@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local runtime data
+artifacts/
+memoria.db
+*.sqlite
+*.db-journal
+*.sqlite-shm
+*.sqlite-wal
+raw-stream.jsonl
+raw-openai-completions.jsonl
+integrations/openclaw/node_modules/

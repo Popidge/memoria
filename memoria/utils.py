@@ -4,6 +4,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from math import sqrt
+import hashlib
 import re
 
 import numpy as np
@@ -78,7 +79,8 @@ def episode_snippet(text: str, keywords: list[str], max_words: int = 28) -> str:
 def hash_embedding(text: str, dimensions: int = 128) -> list[float]:
     vector = np.zeros(dimensions, dtype=float)
     for token in tokenize(text):
-        vector[hash(token) % dimensions] += 1.0
+        digest = hashlib.sha256(token.encode("utf-8")).digest()
+        vector[int.from_bytes(digest[:8], byteorder="big", signed=False) % dimensions] += 1.0
     norm = np.linalg.norm(vector)
     if norm:
         vector = vector / norm

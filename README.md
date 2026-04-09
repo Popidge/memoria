@@ -79,6 +79,92 @@ uv run memoria export-graph --namespace-id demo.sports --out sports-graph.json
 uv run memoria evaluate --name all
 ```
 
+## MemoryArena
+
+Memoria now has a first-pass [MemoryArena](https://memoryarena.github.io/) integration for multi-session benchmark work.
+
+Install the optional dataset dependency:
+
+```bash
+uv sync --extra benchmark
+```
+
+Run the fast local regression path:
+
+```bash
+uv run memoria memoryarena-sync
+uv run memoria memoryarena-eval --smoke
+```
+
+Run one live OpenClaw mode once your local sidecar and plugin are up:
+
+```bash
+uv run memoria serve
+uv run memoria memoryarena-openclaw --memory-mode native --suite group_travel_planner --limit 1 --local
+```
+
+Run the full baseline/native/prefetch comparison matrix:
+
+```bash
+uv run memoria serve
+uv run memoria memoryarena-compare --full --local
+```
+
+Reproduce the sampled live comparison published in this repo:
+
+```bash
+uv run memoria serve
+uv run memoria memoryarena-compare \
+  --suite group_travel_planner \
+  --suite formal_reasoning_math \
+  --suite formal_reasoning_phys \
+  --limit 1 \
+  --local
+```
+
+The live runner now supports three comparison modes:
+
+- `baseline`: OpenClaw only
+- `native`: OpenClaw plus the Memoria context engine
+- `prefetch`: runner-managed prompt injection for sanity/debug comparison
+
+Published benchmark summaries live in [docs/benchmarks/memoryarena-latest.json](/home/jamie/Dev/memoria/docs/benchmarks/memoryarena-latest.json). Full raw artifacts stay local under `artifacts/benchmarks/memoryarena/`.
+
+Benchmark notes live in [docs/memoryarena.md](/home/jamie/Dev/memoria/docs/memoryarena.md).
+
+## Benchmarking
+
+Benchmark comparisons are run in an isolated OpenClaw harness:
+
+- temporary OpenClaw config
+- temporary OpenClaw state directory
+- temporary benchmark-only workspace
+- copied provider auth so the model stack stays identical across modes
+
+That keeps everyday Garland workspace/session memory out of the published numbers.
+
+Current caveat: native step-time benchmark runs rely on the locally patched OpenClaw install used during development, so any published stats should say that explicitly.
+
+## Latest Snapshot
+
+Checked-in benchmark summary:
+- Date: `2026-04-09`
+- Runtime: OpenClaw `2026.4.9 (0512059)`
+- Model: OpenRouter `openrouter/minimax/minimax-m2.7`
+- Live sample: 3 tasks / 16 turns across `group_travel_planner`, `formal_reasoning_math`, and `formal_reasoning_phys`
+
+| Mode | Token F1 | Travel field coverage | Ok | Blocked | Timeout | Failed | Avg latency |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Baseline | 0.042 | 0.397 | 12 | 2 | 1 | 1 | 37.7s |
+| Native | 0.102 | 0.583 | 13 | 2 | 1 | 0 | 44.6s |
+| Prefetch | 0.234 | 0.556 | 13 | 2 | 1 | 0 | 30.6s |
+
+Native improves over baseline on this sampled live run by `+0.061` token F1 and `+0.187` travel field coverage. Prefetch performs best here, but it remains a debug ceiling rather than the target architecture because the goal is first-class memory inside the OpenClaw turn loop, not prompt stuffing from outside the loop.
+
+The full offline `memoryarena_proxy` sweep covers all 5 suites and 4,850 turns. On the `2026-04-09` run it reached `0.583` support recall@5, `0.341` support precision@5, `0.588` prompt support coverage, and an average prompt size of about `108` tokens.
+
+One formal-reasoning physics turn timed out across all live modes on this model/provider stack. Later turns in that same task are marked `blocked` in the benchmark instead of being counted as extra failures, so the summary reflects the real provider/runtime limitation more honestly.
+
 ## Demos
 
 `personal_assistant`
@@ -98,7 +184,7 @@ uv run memoria evaluate --name all
 - Consolidation is synchronous in the MVP, but kept as a separate module boundary.
 - Retrieval is intentionally simple and explainable rather than optimized.
 
-More detail lives in [docs/architecture.md](/home/jamie/Dev/memoria/docs/architecture.md), [docs/scoring.md](/home/jamie/Dev/memoria/docs/scoring.md), and [docs/demo_notes.md](/home/jamie/Dev/memoria/docs/demo_notes.md).
+More detail lives in [docs/architecture.md](/home/jamie/Dev/memoria/docs/architecture.md), [docs/scoring.md](/home/jamie/Dev/memoria/docs/scoring.md), [docs/demo_notes.md](/home/jamie/Dev/memoria/docs/demo_notes.md), and [docs/memoryarena.md](/home/jamie/Dev/memoria/docs/memoryarena.md).
 
 ## Limitations
 

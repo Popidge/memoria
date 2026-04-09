@@ -1,0 +1,20 @@
+{
+  "name": "@memoria/openclaw-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "compat": {
+      "pluginApi": ">=2026.1.29",
+      "minGatewayVersion": "2026.1.29"
+    }
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.48",
+    "openclaw": ">=2026.1.29"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

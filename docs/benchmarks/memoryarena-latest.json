@@ -1,0 +1,274 @@
+{
+  "available_counts": {
+    "formal_reasoning_math": 40,
+    "formal_reasoning_phys": 20,
+    "group_travel_planner": 270
+  },
+  "comparisons": {
+    "native_vs_baseline": {
+      "exact_match_rate_delta": 0.0,
+      "field_coverage_delta": 0.18650793650793657,
+      "format_error_delta": 0.0,
+      "token_f1_delta": 0.060662059141636956
+    },
+    "prefetch_vs_baseline": {
+      "exact_match_rate_delta": 0.0,
+      "field_coverage_delta": 0.15873015873015878,
+      "format_error_delta": 0.0,
+      "token_f1_delta": 0.19260456425892175
+    }
+  },
+  "dataset_name": "ZexueHe/memoryarena",
+  "generated_at": "2026-04-09T19:16:32.207271+00:00",
+  "memory_modes": [
+    "baseline",
+    "native",
+    "prefetch"
+  ],
+  "modes": {
+    "baseline": {
+      "artifact_dir": "artifacts/benchmarks/memoryarena/20260409T185819Z",
+      "config": {
+        "available_counts": {
+          "formal_reasoning_math": 40,
+          "formal_reasoning_phys": 20,
+          "group_travel_planner": 270
+        },
+        "base_config_path": "/home/jamie/.openclaw/openclaw.json",
+        "dataset_name": "ZexueHe/memoryarena",
+        "debug_commands": false,
+        "isolated_openclaw": true,
+        "local": true,
+        "memory_mode": "baseline",
+        "namespace_id": "openclaw.default",
+        "openclaw_agent_id": "main",
+        "openclaw_command": "openclaw",
+        "openclaw_profile": null,
+        "openclaw_version": "OpenClaw 2026.4.9 (0512059)",
+        "raw_stream": false,
+        "raw_stream_path": null,
+        "revision": "main",
+        "selected_counts": {
+          "suite_task_counts": {
+            "formal_reasoning_math": 1,
+            "formal_reasoning_phys": 1,
+            "group_travel_planner": 1
+          },
+          "suite_turn_counts": {
+            "formal_reasoning_math": 5,
+            "formal_reasoning_phys": 3,
+            "group_travel_planner": 8
+          },
+          "task_count": 3,
+          "turn_count": 16
+        },
+        "sidecar_url": "http://127.0.0.1:18733",
+        "source": "ZexueHe/memoryarena",
+        "suites": [
+          "group_travel_planner",
+          "formal_reasoning_math",
+          "formal_reasoning_phys"
+        ],
+        "timeout_seconds": 90
+      },
+      "summary": {
+        "blocked_count": 2,
+        "case_count": 16,
+        "exact_match_rate": 0.0,
+        "failure_count": 1,
+        "field_coverage": 0.3968253968253968,
+        "format_error_count": 0,
+        "latency_ms": 37701.74677591837,
+        "mode": "memoryarena_openclaw",
+        "prompt_support_coverage": null,
+        "prompt_token_count": null,
+        "status_counts": {
+          "blocked": 2,
+          "failed": 1,
+          "ok": 12,
+          "timeout": 1
+        },
+        "suite_case_counts": {
+          "formal_reasoning_math": 5,
+          "formal_reasoning_phys": 3,
+          "group_travel_planner": 8
+        },
+        "support_precision_at_5": null,
+        "support_recall_at_5": null,
+        "timeout_count": 1,
+        "token_f1": 0.04150338107871562
+      }
+    },
+    "native": {
+      "artifact_dir": "artifacts/benchmarks/memoryarena/20260409T190846Z",
+      "config": {
+        "available_counts": {
+          "formal_reasoning_math": 40,
+          "formal_reasoning_phys": 20,
+          "group_travel_planner": 270
+        },
+        "base_config_path": "/home/jamie/.openclaw/openclaw.json",
+        "dataset_name": "ZexueHe/memoryarena",
+        "debug_commands": false,
+        "isolated_openclaw": true,
+        "local": true,
+        "memory_mode": "native",
+        "namespace_id": "openclaw.default",
+        "openclaw_agent_id": "main",
+        "openclaw_command": "openclaw",
+        "openclaw_profile": null,
+        "openclaw_version": "OpenClaw 2026.4.9 (0512059)",
+        "raw_stream": false,
+        "raw_stream_path": null,
+        "revision": "main",
+        "selected_counts": {
+          "suite_task_counts": {
+            "formal_reasoning_math": 1,
+            "formal_reasoning_phys": 1,
+            "group_travel_planner": 1
+          },
+          "suite_turn_counts": {
+            "formal_reasoning_math": 5,
+            "formal_reasoning_phys": 3,
+            "group_travel_planner": 8
+          },
+          "task_count": 3,
+          "turn_count": 16
+        },
+        "sidecar_url": "http://127.0.0.1:18733",
+        "source": "ZexueHe/memoryarena",
+        "suites": [
+          "group_travel_planner",
+          "formal_reasoning_math",
+          "formal_reasoning_phys"
+        ],
+        "timeout_seconds": 90
+      },
+      "summary": {
+        "blocked_count": 2,
+        "case_count": 16,
+        "exact_match_rate": 0.0,
+        "failure_count": 0,
+        "field_coverage": 0.5833333333333334,
+        "format_error_count": 0,
+        "latency_ms": 44572.80808936256,
+        "mode": "memoryarena_openclaw",
+        "prompt_support_coverage": null,
+        "prompt_token_count": null,
+        "status_counts": {
+          "blocked": 2,
+          "ok": 13,
+          "timeout": 1
+        },
+        "suite_case_counts": {
+          "formal_reasoning_math": 5,
+          "formal_reasoning_phys": 3,
+          "group_travel_planner": 8
+        },
+        "support_precision_at_5": null,
+        "support_recall_at_5": null,
+        "timeout_count": 1,
+        "token_f1": 0.10216544022035258
+      }
+    },
+    "prefetch": {
+      "artifact_dir": "artifacts/benchmarks/memoryarena/20260409T191631Z",
+      "config": {
+        "available_counts": {
+          "formal_reasoning_math": 40,
+          "formal_reasoning_phys": 20,
+          "group_travel_planner": 270
+        },
+        "base_config_path": "/home/jamie/.openclaw/openclaw.json",
+        "dataset_name": "ZexueHe/memoryarena",
+        "debug_commands": false,
+        "isolated_openclaw": true,
+        "local": true,
+        "memory_mode": "prefetch",
+        "namespace_id": "openclaw.default",
+        "openclaw_agent_id": "main",
+        "openclaw_command": "openclaw",
+        "openclaw_profile": null,
+        "openclaw_version": "OpenClaw 2026.4.9 (0512059)",
+        "raw_stream": false,
+        "raw_stream_path": null,
+        "revision": "main",
+        "selected_counts": {
+          "suite_task_counts": {
+            "formal_reasoning_math": 1,
+            "formal_reasoning_phys": 1,
+            "group_travel_planner": 1
+          },
+          "suite_turn_counts": {
+            "formal_reasoning_math": 5,
+            "formal_reasoning_phys": 3,
+            "group_travel_planner": 8
+          },
+          "task_count": 3,
+          "turn_count": 16
+        },
+        "sidecar_url": "http://127.0.0.1:18733",
+        "source": "ZexueHe/memoryarena",
+        "suites": [
+          "group_travel_planner",
+          "formal_reasoning_math",
+          "formal_reasoning_phys"
+        ],
+        "timeout_seconds": 90
+      },
+      "summary": {
+        "blocked_count": 2,
+        "case_count": 16,
+        "exact_match_rate": 0.0,
+        "failure_count": 0,
+        "field_coverage": 0.5555555555555556,
+        "format_error_count": 0,
+        "latency_ms": 30613.01810698933,
+        "mode": "memoryarena_openclaw",
+        "prompt_support_coverage": null,
+        "prompt_token_count": null,
+        "status_counts": {
+          "blocked": 2,
+          "ok": 13,
+          "timeout": 1
+        },
+        "suite_case_counts": {
+          "formal_reasoning_math": 5,
+          "formal_reasoning_phys": 3,
+          "group_travel_planner": 8
+        },
+        "support_precision_at_5": null,
+        "support_recall_at_5": null,
+        "timeout_count": 1,
+        "token_f1": 0.23410794533763737
+      }
+    }
+  },
+  "notes": [
+    "Results are model-specific and not comparable to the official MemoryArena leaderboard.",
+    "Native runs currently depend on the locally patched OpenClaw install on this machine."
+  ],
+  "openclaw_command": "openclaw",
+  "openclaw_version": "OpenClaw 2026.4.9 (0512059)",
+  "revision": "main",
+  "selected_counts": {
+    "suite_task_counts": {
+      "formal_reasoning_math": 1,
+      "formal_reasoning_phys": 1,
+      "group_travel_planner": 1
+    },
+    "suite_turn_counts": {
+      "formal_reasoning_math": 5,
+      "formal_reasoning_phys": 3,
+      "group_travel_planner": 8
+    },
+    "task_count": 3,
+    "turn_count": 16
+  },
+  "source": "ZexueHe/memoryarena",
+  "suites": [
+    "group_travel_planner",
+    "formal_reasoning_math",
+    "formal_reasoning_phys"
+  ]
+}

@@ -1,0 +1,1 @@
+{"id": 0, "paper_name": "paper-math-001", "backgrounds": ["Definition: f(x)=x^2+1 and g(x)=2x.", "Use the prior simplification when answering the follow-up."], "questions": ["What is f(3)?", "Given the earlier result, what is g(f(3))?"], "answers": ["f(3)=10.", "Using f(3)=10, g(f(3))=20."]}
