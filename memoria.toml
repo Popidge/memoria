@@ -1,0 +1,40 @@
+database_url = "sqlite:///memoria.db"
+embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+embedding_dimensions = 128
+use_sentence_transformers = false
+decay_factor = 0.65
+scope_match_bonus = 0.08
+entity_similarity_threshold = 0.84
+duplicate_similarity_threshold = 0.86
+
+[activation_weights]
+semantic = 0.45
+keyword = 0.20
+spread = 0.15
+recency = 0.10
+importance = 0.10
+
+[thresholds]
+summary = 0.42
+fact = 0.55
+snippet = 0.72
+
+[top_k]
+semantic_candidates = 8
+keyword_candidates = 8
+neighbor_candidates = 8
+working_memory_total = 8
+per_type = 3
+
+[inhibition]
+recent_surface_steps = 2
+recently_surfaced_penalty = 0.12
+generic_degree_penalty = 0.08
+duplicate_summary_penalty = 0.10
+
+[retrieval]
+confidence_threshold = 0.2
+episode_snippet_words = 28
+
+[namespace_defaults]
+namespace_id = "default"
