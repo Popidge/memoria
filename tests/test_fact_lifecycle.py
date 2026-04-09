@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from tame.models import Fact
+from memoria.models import Fact
 
 
 def test_preference_fact_is_superseded_when_updated(engine):

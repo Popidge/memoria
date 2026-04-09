@@ -3,10 +3,10 @@ from __future__ import annotations
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from tame.config import EngineConfig
-from tame.extraction import EntityCandidate
-from tame.models import Entity
-from tame.utils import TextEmbedder, cosine_similarity, normalise_name, summarise_text
+from memoria.config import EngineConfig
+from memoria.extraction import EntityCandidate
+from memoria.models import Entity
+from memoria.utils import TextEmbedder, cosine_similarity, normalise_name, summarise_text
 
 
 class EntityResolver:

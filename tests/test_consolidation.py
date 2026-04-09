@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from tame.models import GraphEdge, ProvenanceLink, SummaryNode
+from memoria.models import GraphEdge, ProvenanceLink, SummaryNode
 
 
 def test_consolidation_builds_summary_nodes_and_provenance(engine):

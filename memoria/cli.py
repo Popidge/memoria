@@ -6,9 +6,9 @@ import json
 from sqlalchemy import select
 import typer
 
-from tame.demo_data import demo_catalog, load_demo
-from tame.engine import MemoryEngine
-from tame.models import Episode
+from memoria.demo_data import demo_catalog, load_demo
+from memoria.engine import MemoryEngine
+from memoria.models import Episode
 
 app = typer.Typer(help="Memoria prototype CLI.")
 
@@ -113,7 +113,7 @@ def evaluate_command(
     name: str = typer.Option("all", help="Demo name or 'all'."),
     db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
 ) -> None:
-    from tame.evaluation import evaluate_demo
+    from memoria.evaluation import evaluate_demo
 
     engine = _engine(db)
     names = list(demo_catalog()) if name == "all" else [name]

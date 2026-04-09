@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from tame.config import EngineConfig
-from tame.engine import MemoryEngine
+from memoria.config import EngineConfig
+from memoria.engine import MemoryEngine
 
 
 @pytest.fixture

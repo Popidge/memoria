@@ -9,15 +9,15 @@ import json
 
 from sqlalchemy import select
 
-from tame.activation import ActivationService
-from tame.config import DEFAULT_CONFIG, EngineConfig
-from tame.consolidation import ConsolidationService
-from tame.db import create_db_engine, init_db, make_session_factory, session_scope
-from tame.entity_resolution import EntityResolver
-from tame.ingestion import EpisodeInput, IngestionService
-from tame.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode, WorkingMemoryItem
-from tame.retrieval import RetrievalService
-from tame.utils import TextEmbedder
+from memoria.activation import ActivationService
+from memoria.config import DEFAULT_CONFIG, EngineConfig
+from memoria.consolidation import ConsolidationService
+from memoria.db import create_db_engine, init_db, make_session_factory, session_scope
+from memoria.entity_resolution import EntityResolver
+from memoria.ingestion import EpisodeInput, IngestionService
+from memoria.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode, WorkingMemoryItem
+from memoria.retrieval import RetrievalService
+from memoria.utils import TextEmbedder
 
 
 @dataclass

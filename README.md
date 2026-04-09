@@ -57,9 +57,9 @@ activation =
 
 ```bash
 uv sync
-uv run tame init
-uv run tame ingest-demo sports_query
-uv run tame run-demo sports_query
+uv run memoria init
+uv run memoria ingest-demo sports_query
+uv run memoria run-demo sports_query
 uv run pytest
 ```
 
@@ -68,15 +68,15 @@ That should get you from empty repo to a working local prototype in under five m
 ## CLI
 
 ```bash
-uv run tame init
-uv run tame ingest-demo personal_assistant
-uv run tame ingest-demo research_agent
-uv run tame ingest-demo sports_query
-uv run tame run-demo sports_query
-uv run tame search "Toronto Maple Leafs 2025-26 season" --namespace-id demo.sports
-uv run tame consolidate --namespace-id demo.sports --force
-uv run tame export-graph --namespace-id demo.sports --out sports-graph.json
-uv run tame evaluate --name all
+uv run memoria init
+uv run memoria ingest-demo personal_assistant
+uv run memoria ingest-demo research_agent
+uv run memoria ingest-demo sports_query
+uv run memoria run-demo sports_query
+uv run memoria search "Toronto Maple Leafs 2025-26 season" --namespace-id demo.sports
+uv run memoria consolidate --namespace-id demo.sports --force
+uv run memoria export-graph --namespace-id demo.sports --out sports-graph.json
+uv run memoria evaluate --name all
 ```
 
 ## Demos

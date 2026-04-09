@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from tame.models import Episode
+from memoria.models import Episode
 
 
 def test_add_update_delete_episode(engine):

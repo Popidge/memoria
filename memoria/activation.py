@@ -7,10 +7,10 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from tame.config import EngineConfig
-from tame.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, SummaryNode, WorkingMemoryContentType, WorkingMemoryItem
-from tame.retrieval import RetrievalService
-from tame.utils import build_text_signal, clip, cosine_similarity, episode_snippet, keyword_overlap, recency_decay
+from memoria.config import EngineConfig
+from memoria.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, SummaryNode, WorkingMemoryContentType, WorkingMemoryItem
+from memoria.retrieval import RetrievalService
+from memoria.utils import build_text_signal, clip, cosine_similarity, episode_snippet, keyword_overlap, recency_decay
 
 
 @dataclass

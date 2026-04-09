@@ -6,7 +6,7 @@ from typing import Iterator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from tame.models import Base
+from memoria.models import Base
 
 
 def create_db_engine(database_url: str):

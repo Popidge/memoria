@@ -5,8 +5,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from tame.models import Episode, SourceType
-from tame.utils import TextEmbedder, summarise_text
+from memoria.models import Episode, SourceType
+from memoria.utils import TextEmbedder, summarise_text
 
 
 @dataclass

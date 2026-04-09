@@ -4,10 +4,10 @@ from time import perf_counter
 
 from sqlalchemy import select
 
-from tame.demo_data import demo_catalog
-from tame.engine import MemoryEngine
-from tame.models import Episode
-from tame.utils import word_count
+from memoria.demo_data import demo_catalog
+from memoria.engine import MemoryEngine
+from memoria.models import Episode
+from memoria.utils import word_count
 
 
 def precision_at_k(items: list[str], expected_prefixes: list[str], k: int) -> float:

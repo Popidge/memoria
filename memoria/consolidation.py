@@ -6,11 +6,11 @@ from datetime import datetime
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from tame.config import EngineConfig
-from tame.entity_resolution import EntityResolver
-from tame.extraction import build_summary_titles, extract_entities, extract_fact_candidates
-from tame.models import Entity, Episode, Fact, GraphEdge, NodeType, ProvenanceLink, SummaryNode, SummaryType
-from tame.utils import TextEmbedder, summarise_text, utc_now
+from memoria.config import EngineConfig
+from memoria.entity_resolution import EntityResolver
+from memoria.extraction import build_summary_titles, extract_entities, extract_fact_candidates
+from memoria.models import Entity, Episode, Fact, GraphEdge, NodeType, ProvenanceLink, SummaryNode, SummaryType
+from memoria.utils import TextEmbedder, summarise_text, utc_now
 
 
 class ConsolidationService:
@@ -361,7 +361,7 @@ class ConsolidationService:
 
 
 def extract_entities_for_subject(name: str):
-    from tame.extraction import EntityCandidate
+    from memoria.extraction import EntityCandidate
 
     entity_type = "person" if name.startswith("user:") else "topic"
     if name.startswith("agent:"):

@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Any
 import re
 
-from tame.models import Episode, SourceType
-from tame.utils import capitalised_phrases, summarise_text
+from memoria.models import Episode, SourceType
+from memoria.utils import capitalised_phrases, summarise_text
 
 
 @dataclass

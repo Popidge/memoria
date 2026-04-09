@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tame.extraction import EntityCandidate
+from memoria.extraction import EntityCandidate
 
 
 def test_entity_resolution_handles_exact_and_alias_matches(engine):

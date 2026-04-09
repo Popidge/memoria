@@ -6,9 +6,9 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from tame.config import EngineConfig
-from tame.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode
-from tame.utils import TextEmbedder, build_text_signal, cosine_similarity, extract_keywords, keyword_overlap, recency_decay
+from memoria.config import EngineConfig
+from memoria.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode
+from memoria.utils import TextEmbedder, build_text_signal, cosine_similarity, extract_keywords, keyword_overlap, recency_decay
 
 
 @dataclass

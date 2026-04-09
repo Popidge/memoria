@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tame = "tame.cli:app"
+memoria = "memoria.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -25,4 +25,4 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.hatch.build.targets.wheel]
-packages = ["tame"]
+packages = ["memoria"]

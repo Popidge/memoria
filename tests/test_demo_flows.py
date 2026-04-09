@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from tame.demo_data import demo_catalog
-from tame.evaluation import evaluate_demo
+from memoria.demo_data import demo_catalog
+from memoria.evaluation import evaluate_demo
 
 
 def test_sports_demo_shows_light_up_behavior(engine):

@@ -1,5 +1,5 @@
 """Memoria prototype package."""
 
-from tame.engine import MemoryEngine
+from memoria.engine import MemoryEngine
 
 __all__ = ["MemoryEngine"]
