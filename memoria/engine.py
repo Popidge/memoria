@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from threading import RLock
 from typing import Any
 from uuid import uuid4
 import json
@@ -49,6 +50,8 @@ class MemoryEngine:
         self.consolidation_service = ConsolidationService(self.embedder, self.resolver, self.config)
         self.activation_service = ActivationService(self.retrieval, self.config)
         self._runs: dict[str, RunContext] = {}
+        self._runs_lock = RLock()
+        self._run_locks: dict[str, RLock] = {}
 
     def add_episode(self, **kwargs) -> dict[str, Any]:
         with session_scope(self.session_factory) as session:
@@ -123,8 +126,36 @@ class MemoryEngine:
             agent_id=agent_id,
             session_id=session_id,
         )
-        self._runs[run.run_id] = run
+        with self._runs_lock:
+            self._runs[run.run_id] = run
+            self._run_locks[run.run_id] = RLock()
         return run.__dict__.copy()
+
+    def attach_run(
+        self,
+        run_id: str,
+        *,
+        namespace_id: str,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        session_id: str | None = None,
+        step_index: int = 0,
+    ) -> dict[str, Any]:
+        with self._runs_lock:
+            existing = self._runs.get(run_id)
+            if existing is not None:
+                return existing.__dict__.copy()
+            run = RunContext(
+                run_id=run_id,
+                namespace_id=namespace_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                session_id=session_id,
+                step_index=step_index,
+            )
+            self._runs[run_id] = run
+            self._run_locks[run_id] = RLock()
+            return run.__dict__.copy()
 
     def process_step(
         self,
@@ -134,25 +165,53 @@ class MemoryEngine:
         linked_tool_name: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        result = self.process_step_result(
+            run_id,
+            step_type=step_type,
+            text=text,
+            linked_tool_name=linked_tool_name,
+            metadata=metadata,
+        )
+        return result["working_memory"]
+
+    def process_step_result(
+        self,
+        run_id: str,
+        step_type: str,
+        text: str,
+        linked_tool_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        run_lock = self._require_run_lock(run_id)
+        with run_lock:
+            run = self._require_run(run_id)
+            with session_scope(self.session_factory) as session:
+                result = self.activation_service.process_step(
+                    session,
+                    run_id=run.run_id,
+                    step_index=run.step_index,
+                    namespace_id=run.namespace_id,
+                    step_type=step_type,
+                    text=text,
+                    linked_tool_name=linked_tool_name,
+                    metadata=metadata,
+                    filters={
+                        "user_id": run.user_id,
+                        "agent_id": run.agent_id,
+                        "session_id": run.session_id,
+                    },
+                )
+            run.step_index += 1
+            return {
+                "run_id": result.run_id,
+                "step_index": result.step_index,
+                "working_memory": result.working_memory,
+                "debug": result.debug,
+            }
+
+    def get_run_context(self, run_id: str) -> dict[str, Any]:
         run = self._require_run(run_id)
-        with session_scope(self.session_factory) as session:
-            result = self.activation_service.process_step(
-                session,
-                run_id=run.run_id,
-                step_index=run.step_index,
-                namespace_id=run.namespace_id,
-                step_type=step_type,
-                text=text,
-                linked_tool_name=linked_tool_name,
-                metadata=metadata,
-                filters={
-                    "user_id": run.user_id,
-                    "agent_id": run.agent_id,
-                    "session_id": run.session_id,
-                },
-            )
-        run.step_index += 1
-        return result.working_memory
+        return run.__dict__.copy()
 
     def get_working_memory(self, run_id: str, step_index: int | None = None) -> list[dict[str, Any]]:
         with session_scope(self.session_factory) as session:
@@ -262,10 +321,18 @@ class MemoryEngine:
         return payload
 
     def _require_run(self, run_id: str) -> RunContext:
-        run = self._runs.get(run_id)
-        if run is None:
-            raise ValueError(f"Unknown run_id: {run_id}")
-        return run
+        with self._runs_lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                raise ValueError(f"Unknown run_id: {run_id}")
+            return run
+
+    def _require_run_lock(self, run_id: str) -> RLock:
+        with self._runs_lock:
+            run_lock = self._run_locks.get(run_id)
+            if run_lock is None:
+                raise ValueError(f"Unknown run_id: {run_id}")
+            return run_lock
 
     def _episode_dict(self, episode: Episode) -> dict[str, Any]:
         return {

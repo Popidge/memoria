@@ -16,19 +16,30 @@ from memoria.memoryarena import (
     LIVE_SUPPORTED_SUITES,
     LIVE_MEMORY_MODES,
     PUBLIC_SUMMARY_PATH,
+    build_memoryarena_derived_manifest,
     compare_memoryarena_openclaw,
+    evaluate_memoryarena_agent,
+    evaluate_memoryarena_offline,
     evaluate_memoryarena_proxy,
     load_memoryarena_corpus,
+    materialize_memoryarena_derived_manifest,
     run_memoryarena_openclaw,
 )
 from memoria.models import Episode
 from memoria.sidecar import create_sidecar_server
+from memoria.providers import ProviderConfig
+from memoria.workbench import RunSpec, WorkbenchService
+from memoria.workbench_server import create_workbench_server
 
 app = typer.Typer(help="Memoria prototype CLI.")
 
 
 def _engine(db: str) -> MemoryEngine:
     return MemoryEngine(database_url=db)
+
+
+def _workbench(db: str) -> WorkbenchService:
+    return WorkbenchService(_engine(db))
 
 
 @app.command("init")
@@ -169,12 +180,18 @@ def memoryarena_sync_command(
 def memoryarena_eval_command(
     db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
     suite: list[str] = typer.Option([], "--suite", help="MemoryArena suite to evaluate. Repeat to select multiple."),
+    family: str = typer.Option("all", help="Benchmark family: snapshot_lookup, learn_as_you_act, or all."),
+    strand: list[str] = typer.Option([], "--strand", help="Optional strand filter. Repeat to select multiple."),
     revision: str = typer.Option(DEFAULT_REVISION, help="Dataset revision to evaluate."),
     cache_dir: Path = typer.Option(DEFAULT_CACHE_DIR, help="Dataset cache directory."),
     data_root: Path | None = typer.Option(None, help="Optional local fixture root for offline development."),
     smoke: bool = typer.Option(True, "--smoke/--full", help="Run the smoke slice by default."),
     limit: int | None = typer.Option(None, help="Optional per-suite task limit."),
     artifact_root: Path = typer.Option(DEFAULT_ARTIFACT_ROOT, help="Artifact directory root."),
+    prompt_limit: int = typer.Option(4, help="Prompt addition working-memory limit."),
+    strategy: str = typer.Option("hybrid", help="Offline strategy: hybrid or legacy."),
+    trace_mode: str = typer.Option("summary", help="Trace capture mode: summary, full, or failures."),
+    jobs: str = typer.Option("1", help="Offline worker count for task-level parallelism, or auto."),
 ) -> None:
     engine = _engine(db)
     limit_per_suite = limit if limit is not None else (DEFAULT_SMOKE_LIMIT if smoke else None)
@@ -185,10 +202,92 @@ def memoryarena_eval_command(
         data_root=data_root,
         limit_per_suite=limit_per_suite,
     )
-    result = evaluate_memoryarena_proxy(
+    manifest = build_memoryarena_derived_manifest(corpus)
+    result = evaluate_memoryarena_offline(
         engine,
-        corpus,
+        manifest,
+        family=family,
+        suites=corpus.suites,
+        strands=strand or None,
         artifact_root=artifact_root,
+        prompt_limit=prompt_limit,
+        strategy=strategy,
+        trace_mode=trace_mode,
+        jobs=jobs,
+    )
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("memoryarena-build")
+def memoryarena_build_command(
+    suite: list[str] = typer.Option([], "--suite", help="MemoryArena suite to build. Repeat to select multiple."),
+    revision: str = typer.Option(DEFAULT_REVISION, help="Dataset revision to build from."),
+    cache_dir: Path = typer.Option(DEFAULT_CACHE_DIR, help="Dataset cache directory."),
+    data_root: Path | None = typer.Option(None, help="Optional local fixture root for offline development."),
+    smoke: bool = typer.Option(False, help="Only build the smoke slice instead of every case."),
+    limit: int | None = typer.Option(None, help="Optional per-suite task limit."),
+    artifact_root: Path = typer.Option(DEFAULT_ARTIFACT_ROOT, help="Artifact directory root."),
+) -> None:
+    limit_per_suite = limit if limit is not None else (DEFAULT_SMOKE_LIMIT if smoke else None)
+    corpus = load_memoryarena_corpus(
+        suites=suite or None,
+        revision=revision,
+        cache_dir=cache_dir,
+        data_root=data_root,
+        limit_per_suite=limit_per_suite,
+    )
+    result = materialize_memoryarena_derived_manifest(corpus, artifact_root=artifact_root)
+    typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("memoryarena-agent-eval")
+def memoryarena_agent_eval_command(
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+    suite: list[str] = typer.Option([], "--suite", help="MemoryArena suite to evaluate. Repeat to select multiple."),
+    family: str = typer.Option("all", help="Benchmark family: snapshot_lookup, learn_as_you_act, or all."),
+    strand: list[str] = typer.Option([], "--strand", help="Optional strand filter. Repeat to select multiple."),
+    provider_type: str = typer.Option("replay", help="Provider backend: replay or openai-compatible."),
+    model_name: str = typer.Option("replay", help="Provider model name."),
+    api_base_url: str | None = typer.Option(None, help="OpenAI-compatible API base URL."),
+    api_key_env: str | None = typer.Option(None, help="Environment variable containing the API key."),
+    temperature: float = typer.Option(0.2, help="Sampling temperature for openai-compatible backends."),
+    max_tokens: int | None = typer.Option(None, help="Optional maximum output tokens."),
+    timeout_seconds: int = typer.Option(120, help="Provider timeout in seconds."),
+    revision: str = typer.Option(DEFAULT_REVISION, help="Dataset revision to evaluate."),
+    cache_dir: Path = typer.Option(DEFAULT_CACHE_DIR, help="Dataset cache directory."),
+    data_root: Path | None = typer.Option(None, help="Optional local fixture root for offline development."),
+    smoke: bool = typer.Option(True, "--smoke/--full", help="Run the smoke slice by default."),
+    limit: int | None = typer.Option(None, help="Optional per-suite task limit."),
+    artifact_root: Path = typer.Option(DEFAULT_ARTIFACT_ROOT, help="Artifact directory root."),
+    prompt_limit: int = typer.Option(4, help="Prompt addition working-memory limit."),
+) -> None:
+    limit_per_suite = limit if limit is not None else (DEFAULT_SMOKE_LIMIT if smoke else None)
+    corpus = load_memoryarena_corpus(
+        suites=suite or None,
+        revision=revision,
+        cache_dir=cache_dir,
+        data_root=data_root,
+        limit_per_suite=limit_per_suite,
+    )
+    manifest = build_memoryarena_derived_manifest(corpus)
+    service = _workbench(db)
+    result = evaluate_memoryarena_agent(
+        service,
+        manifest,
+        provider_config=ProviderConfig(
+            provider_type=provider_type,
+            model_name=model_name,
+            api_base_url=api_base_url,
+            api_key_env=api_key_env,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+        ),
+        family=family,
+        suites=corpus.suites,
+        strands=strand or None,
+        artifact_root=artifact_root,
+        prompt_limit=prompt_limit,
     )
     typer.echo(json.dumps(result, indent=2))
 
@@ -331,3 +430,180 @@ def serve_command(
         typer.echo("Memoria sidecar stopped.")
     finally:
         server.server_close()
+
+
+@app.command("workbench-serve")
+def workbench_serve_command(
+    host: str = typer.Option("127.0.0.1", help="Host interface for the Memoria workbench."),
+    port: int = typer.Option(8080, help="Port for the Memoria workbench."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    server = create_workbench_server(service, host=host, port=port)
+    typer.echo(f"Memoria workbench listening on http://{host}:{port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        typer.echo("Memoria workbench stopped.")
+    finally:
+        server.server_close()
+
+
+@app.command("workbench-runs")
+def workbench_runs_command(
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+    limit: int = typer.Option(20, help="Maximum number of runs to list."),
+) -> None:
+    service = _workbench(db)
+    typer.echo(json.dumps(service.list_runs(limit=limit), indent=2))
+
+
+@app.command("workbench-create-run")
+def workbench_create_run_command(
+    title: str = typer.Option("Workbench session", help="Human-friendly run title."),
+    provider_type: str = typer.Option("replay", help="Provider type: replay or openai-compatible."),
+    model_name: str = typer.Option("replay", help="Model name for the provider."),
+    api_base_url: str | None = typer.Option(None, help="OpenAI-compatible API base URL."),
+    api_key_env: str | None = typer.Option(None, help="Environment variable containing the API key."),
+    system_prompt: str = typer.Option("You are a helpful assistant.", help="System prompt for the run."),
+    prompt_limit: int = typer.Option(4, help="Maximum working-memory items injected into the prompt."),
+    namespace_id: str = typer.Option("workbench.default", help="Memory namespace for this run."),
+    user_id: str | None = typer.Option("local-user", help="User id for the run."),
+    agent_id: str | None = typer.Option("assistant", help="Agent id for the run."),
+    session_id: str | None = typer.Option(None, help="Optional session id."),
+    replay_response: list[str] = typer.Option([], "--replay-response", help="Repeatable canned responses for replay mode."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    run = service.create_run(
+        RunSpec(
+            title=title,
+            provider=ProviderConfig(
+                provider_type=provider_type,
+                model_name=model_name,
+                api_base_url=api_base_url,
+                api_key_env=api_key_env,
+                replay_responses=list(replay_response),
+            ),
+            namespace_id=namespace_id,
+            user_id=user_id,
+            agent_id=agent_id,
+            session_id=session_id,
+            system_prompt=system_prompt,
+            prompt_limit=prompt_limit,
+        )
+    )
+    typer.echo(json.dumps(run, indent=2))
+
+
+@app.command("workbench-send")
+def workbench_send_command(
+    run_id: str = typer.Argument(..., help="Experiment run id."),
+    message: str = typer.Argument(..., help="User message to send."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    typer.echo(json.dumps(service.send_user_message(run_id, message), indent=2))
+
+
+@app.command("workbench-show")
+def workbench_show_command(
+    run_id: str = typer.Argument(..., help="Experiment run id."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    typer.echo(
+        json.dumps(
+            {
+                "run": service.get_run(run_id),
+                "turns": service.list_turns(run_id),
+            },
+            indent=2,
+        )
+    )
+
+
+@app.command("workbench-trace")
+def workbench_trace_command(
+    run_id: str = typer.Argument(..., help="Experiment run id."),
+    step_index: int | None = typer.Option(None, help="Optional memory step index to inspect."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    typer.echo(json.dumps(service.trace(run_id, step_index=step_index), indent=2))
+
+
+@app.command("workbench-corpus")
+def workbench_corpus_command(
+    run_id: str = typer.Argument(..., help="Experiment run id."),
+    limit: int = typer.Option(20, help="Maximum number of records per section."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    typer.echo(json.dumps(service.corpus_snapshot(run_id, limit=limit), indent=2))
+
+
+@app.command("workbench-memoryarena")
+def workbench_memoryarena_command(
+    suite: str | None = typer.Option(None, help="Optional MemoryArena suite name."),
+    task_id: str | None = typer.Option(None, help="Optional task id within the selected suite."),
+    limit: int = typer.Option(20, help="Maximum number of tasks to list."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    if suite is None:
+        typer.echo(json.dumps(service.memoryarena_suites(), indent=2))
+        return
+    if task_id is None:
+        typer.echo(json.dumps(service.memoryarena_tasks(suite, limit=limit), indent=2))
+        return
+    typer.echo(json.dumps(service.memoryarena_task(suite, task_id), indent=2))
+
+
+@app.command("workbench-chat")
+def workbench_chat_command(
+    run_id: str | None = typer.Option(None, help="Existing run id. If omitted, a new run is created."),
+    title: str = typer.Option("CLI chat session", help="Run title when creating a new run."),
+    provider_type: str = typer.Option("replay", help="Provider type: replay or openai-compatible."),
+    model_name: str = typer.Option("replay", help="Model name for the provider."),
+    api_base_url: str | None = typer.Option(None, help="OpenAI-compatible API base URL."),
+    api_key_env: str | None = typer.Option(None, help="Environment variable containing the API key."),
+    replay_response: list[str] = typer.Option([], "--replay-response", help="Repeat canned responses for replay mode."),
+    system_prompt: str = typer.Option("You are a helpful assistant.", help="System prompt when creating a new run."),
+    prompt_limit: int = typer.Option(4, help="Maximum working-memory items injected into the prompt."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+) -> None:
+    service = _workbench(db)
+    active_run_id = run_id
+    if active_run_id is None:
+        created = service.create_run(
+            RunSpec(
+                title=title,
+                provider=ProviderConfig(
+                    provider_type=provider_type,
+                    model_name=model_name,
+                    api_base_url=api_base_url,
+                    api_key_env=api_key_env,
+                    replay_responses=list(replay_response),
+                ),
+                system_prompt=system_prompt,
+                prompt_limit=prompt_limit,
+            )
+        )
+        active_run_id = created["id"]
+        typer.echo(f"run_id={active_run_id}")
+    typer.echo("Enter messages. Submit an empty line or press Ctrl-D to exit.")
+    while True:
+        try:
+            user_message = typer.prompt("you", prompt_suffix="> ", default="", show_default=False)
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("")
+            break
+        if not user_message.strip():
+            break
+        result = service.send_user_message(active_run_id, user_message)
+        typer.echo(f"assistant> {result['turn']['assistant_message']}")
+
+
+if __name__ == "__main__":
+    app()

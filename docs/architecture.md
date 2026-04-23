@@ -41,6 +41,10 @@ This is used both as a standalone baseline and as the candidate generator for ac
 
 Each step produces a text signal. The engine scores candidates, spreads activation over one-hop edges, applies decay and inhibition, then promotes compact content into working memory. Activation state and working memory are persisted for every step so runs are inspectable after the fact.
 
+## Workbench
+
+The local workbench sits on top of the canonical engine. It persists experiment runs and turns, records prompt additions and provider payloads, and exposes the same runtime through CLI commands and a small HTTP UI. Replay and OpenAI-compatible providers share the same `ProviderConfig` contract so benchmark and manual runs exercise the same code path.
+
 ## Consolidation
 
 Consolidation is the dreaming pass. It:

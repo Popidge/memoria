@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Memoria Workbench</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="panel sidebar">
+        <div class="brand">
+          <h1>Memoria Workbench</h1>
+          <p>Chat, traces, graph state, corpus, and MemoryArena inspection in one local app.</p>
+        </div>
+        <form id="run-form" class="card stack">
+          <h2>Create Run</h2>
+          <label>
+            Title
+            <input name="title" type="text" value="Workbench session" />
+          </label>
+          <label>
+            Provider
+            <select name="provider_type">
+              <option value="replay">Replay</option>
+              <option value="openai-compatible">OpenAI-compatible</option>
+            </select>
+          </label>
+          <label>
+            Model
+            <input name="model_name" type="text" value="replay" />
+          </label>
+          <label>
+            API Base URL
+            <input name="api_base_url" type="text" placeholder="https://openrouter.ai/api/v1" />
+          </label>
+          <label>
+            API Key Env
+            <input name="api_key_env" type="text" placeholder="OPENROUTER_API_KEY" />
+          </label>
+          <label>
+            Prompt Limit
+            <input name="prompt_limit" type="number" min="1" max="8" value="4" />
+          </label>
+          <label>
+            System Prompt
+            <textarea name="system_prompt" rows="5">You are a helpful assistant.</textarea>
+          </label>
+          <button type="submit">Create Run</button>
+        </form>
+        <section class="card stack">
+          <div class="row heading">
+            <h2>Runs</h2>
+            <button id="refresh-runs" type="button">Refresh</button>
+          </div>
+          <div id="runs-list" class="list"></div>
+        </section>
+      </aside>
+
+      <main class="panel main-panel">
+        <section class="card stack">
+          <div class="row heading">
+            <div>
+              <h2 id="active-run-title">No Active Run</h2>
+              <p id="active-run-meta" class="muted">Create or select a run to start chatting.</p>
+            </div>
+            <span id="run-status" class="pill">idle</span>
+          </div>
+          <div id="chat-log" class="chat-log"></div>
+          <form id="chat-form" class="chat-form">
+            <textarea id="chat-input" rows="3" placeholder="Send a message to the active run..." disabled></textarea>
+            <button id="send-button" type="submit" disabled>Send</button>
+          </form>
+        </section>
+
+        <section class="grid two-up">
+          <article class="card stack">
+            <div class="row heading">
+              <h2>Latest Trace</h2>
+              <button id="refresh-trace" type="button">Refresh</button>
+            </div>
+            <pre id="trace-view" class="code-block"></pre>
+          </article>
+          <article class="card stack">
+            <div class="row heading">
+              <h2>Graph Snapshot</h2>
+              <button id="refresh-graph" type="button">Refresh</button>
+            </div>
+            <pre id="graph-view" class="code-block"></pre>
+          </article>
+        </section>
+
+        <section class="grid two-up">
+          <article class="card stack">
+            <div class="row heading">
+              <h2>Corpus Snapshot</h2>
+              <button id="refresh-corpus" type="button">Refresh</button>
+            </div>
+            <pre id="corpus-view" class="code-block"></pre>
+          </article>
+          <article class="card stack">
+            <div class="row heading">
+              <h2>MemoryArena</h2>
+              <button id="refresh-memoryarena" type="button">Refresh</button>
+            </div>
+            <div id="memoryarena-view" class="code-block"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

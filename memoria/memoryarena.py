@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,6 +42,22 @@ DEFAULT_CACHE_DIR = Path.home() / ".cache" / "memoria" / "memoryarena"
 DEFAULT_ARTIFACT_ROOT = Path("artifacts") / "benchmarks" / "memoryarena"
 DEFAULT_SMOKE_LIMIT = 1
 PUBLIC_SUMMARY_PATH = Path("docs") / "benchmarks" / "memoryarena-latest.json"
+DERIVED_MANIFEST_VERSION = "memoryarena-derived-v1"
+DERIVED_FAMILIES = (
+    "snapshot_lookup",
+    "learn_as_you_act",
+)
+SUPPORT_K = 5
+OFFLINE_STRATEGIES = ("hybrid", "legacy")
+OFFLINE_TRACE_MODES = ("summary", "full", "failures")
+
+SUITE_STRANDS = {
+    "bundled_shopping": ("incremental_state_tracking", "compatibility_constraints"),
+    "progressive_search": ("entity_accumulation", "composed_fact_lookup"),
+    "group_travel_planner": ("static_background_recall", "structured_plan_continuity"),
+    "formal_reasoning_math": ("paper_context_recall", "reasoning_carryover"),
+    "formal_reasoning_phys": ("paper_context_recall", "reasoning_carryover"),
+}
 
 BENCHMARK_WORKSPACE_FILES = {
     "AGENTS.md": """# AGENTS.md
@@ -112,9 +129,60 @@ class SupportArtifact:
     overlap: float
 
 
+@dataclass
+class MemoryArenaArtifact:
+    artifact_id: str
+    kind: str
+    text: str
+    value: Any
+    metadata: dict[str, Any]
+
+
+@dataclass
+class MemoryArenaDerivedCase:
+    case_id: str
+    family: str
+    suite: str
+    strand: str
+    task_id: str
+    turn_index: int
+    question: str
+    gold_answer_text: str
+    gold_answer_value: Any
+    static_artifacts: list[dict[str, Any]]
+    dynamic_artifacts_before_turn: list[dict[str, Any]]
+    expected_support_ids: list[str]
+    scorer: str
+    scorer_payload: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+@dataclass
+class MemoryArenaDerivedManifest:
+    manifest_version: str
+    dataset_name: str
+    revision: str
+    source: str
+    suites: list[str]
+    counts: dict[str, int]
+    cases: list[MemoryArenaDerivedCase]
+
+
 def _timestamp_slug(now: datetime | None = None) -> str:
     now = now or datetime.now(timezone.utc)
     return now.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _normalise_offline_jobs(jobs: int | str) -> int:
+    if isinstance(jobs, str) and jobs.strip().lower() == "auto":
+        return max(1, os.cpu_count() or 1)
+    try:
+        parsed = int(jobs)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("jobs must be a positive integer or 'auto'") from exc
+    if parsed < 1:
+        raise ValueError("jobs must be a positive integer or 'auto'")
+    return parsed
 
 
 def _normalise_scalar(value: Any) -> str:
@@ -282,6 +350,276 @@ def load_memoryarena_corpus(
     )
 
 
+def _suite_strand(suite: str, turn_index: int) -> str:
+    first_turn, later_turn = SUITE_STRANDS[suite]
+    return first_turn if turn_index == 0 else later_turn
+
+
+def _artifact_to_dict(artifact: MemoryArenaArtifact) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "kind": artifact.kind,
+        "text": artifact.text,
+        "value": artifact.value,
+        "metadata": artifact.metadata,
+    }
+
+
+def _case_to_dict(case: MemoryArenaDerivedCase) -> dict[str, Any]:
+    return {
+        "case_id": case.case_id,
+        "family": case.family,
+        "suite": case.suite,
+        "strand": case.strand,
+        "task_id": case.task_id,
+        "turn_index": case.turn_index,
+        "question": case.question,
+        "gold_answer_text": case.gold_answer_text,
+        "gold_answer_value": case.gold_answer_value,
+        "static_artifacts": case.static_artifacts,
+        "dynamic_artifacts_before_turn": case.dynamic_artifacts_before_turn,
+        "expected_support_ids": case.expected_support_ids,
+        "scorer": case.scorer,
+        "scorer_payload": case.scorer_payload,
+        "metadata": case.metadata,
+    }
+
+
+def _build_travel_static_artifacts(task: MemoryArenaTask) -> list[MemoryArenaArtifact]:
+    artifacts: list[MemoryArenaArtifact] = []
+    for index, background in enumerate(task.background_items):
+        kind = "travel_base_query" if index == 0 else "travel_base_plan"
+        artifacts.append(
+            MemoryArenaArtifact(
+                artifact_id=f"{task.suite}:{task.task_id}:static:{kind}",
+                kind=kind,
+                text=background,
+                value=background,
+                metadata={"suite": task.suite, "task_id": task.task_id, "source": "task_background"},
+            )
+        )
+    return artifacts
+
+
+def _build_formal_static_artifacts(task: MemoryArenaTask, turn: MemoryArenaTurn) -> list[MemoryArenaArtifact]:
+    return [
+        MemoryArenaArtifact(
+            artifact_id=f"{task.suite}:{task.task_id}:static:turn_{turn.turn_index}:{index}",
+            kind="paper_context",
+            text=background,
+            value=background,
+            metadata={
+                "suite": task.suite,
+                "task_id": task.task_id,
+                "turn_index": turn.turn_index,
+                "paper_name": turn.metadata.get("paper_name"),
+            },
+        )
+        for index, background in enumerate(turn.background_items)
+    ]
+
+
+def _shopping_answer_artifact_text(answer_value: Any) -> str:
+    if not isinstance(answer_value, dict):
+        return serialise_answer(answer_value)
+    asin = str(answer_value.get("target_asin") or "unknown").strip()
+    attributes = [
+        str(item).strip()
+        for item in (answer_value.get("attributes") or [])
+        if str(item).strip()
+    ]
+    if not attributes:
+        return f"Selected product {asin}."
+    return f"Selected product {asin} with attributes: {', '.join(attributes)}."
+
+
+def _build_dynamic_artifact(task: MemoryArenaTask, turn: MemoryArenaTurn) -> MemoryArenaArtifact:
+    if task.suite == "bundled_shopping":
+        text = _shopping_answer_artifact_text(turn.gold_answer_value)
+        kind = "shopping_selection"
+    elif task.suite == "group_travel_planner":
+        text = f"Traveler plan:\n{serialise_answer(turn.gold_answer_value)}"
+        kind = "travel_plan"
+    elif task.suite in {"formal_reasoning_math", "formal_reasoning_phys"}:
+        paper_name = turn.metadata.get("paper_name")
+        prefix = f"{paper_name}: " if paper_name else ""
+        text = f"{prefix}{turn.gold_answer_text}".strip()
+        kind = "reasoning_answer"
+    else:
+        text = turn.gold_answer_text
+        kind = "search_result"
+    return MemoryArenaArtifact(
+        artifact_id=f"{task.suite}:{task.task_id}:dynamic:turn_{turn.turn_index}",
+        kind=kind,
+        text=text,
+        value=turn.gold_answer_value,
+        metadata={
+            "suite": task.suite,
+            "task_id": task.task_id,
+            "turn_index": turn.turn_index,
+            "question": turn.question,
+        },
+    )
+
+
+def _static_artifacts_for_turn(task: MemoryArenaTask, turn: MemoryArenaTurn) -> list[MemoryArenaArtifact]:
+    if task.suite == "group_travel_planner":
+        return _build_travel_static_artifacts(task)
+    if task.suite in {"formal_reasoning_math", "formal_reasoning_phys"}:
+        return _build_formal_static_artifacts(task, turn)
+    return []
+
+
+def _expected_support_ids(
+    suite: str,
+    static_artifacts: list[MemoryArenaArtifact],
+    dynamic_artifacts: list[MemoryArenaArtifact],
+) -> list[str]:
+    if suite in {"bundled_shopping", "progressive_search"}:
+        return [artifact.artifact_id for artifact in dynamic_artifacts]
+    support_ids = [artifact.artifact_id for artifact in static_artifacts]
+    support_ids.extend(artifact.artifact_id for artifact in dynamic_artifacts)
+    return support_ids
+
+
+def _scorer_for_turn(turn: MemoryArenaTurn) -> tuple[str, dict[str, Any]]:
+    if turn.suite == "group_travel_planner":
+        return (
+            "travel_field_coverage",
+            {
+                "field_values": _travel_field_values(turn.gold_answer_value),
+            },
+        )
+    return (
+        "token_f1",
+        {
+            "gold_answer_text": turn.gold_answer_text,
+        },
+    )
+
+
+def build_memoryarena_derived_manifest(corpus: MemoryArenaCorpus) -> MemoryArenaDerivedManifest:
+    cases: list[MemoryArenaDerivedCase] = []
+    for task in corpus.tasks:
+        prior_dynamic: list[MemoryArenaArtifact] = []
+        for turn in task.turns:
+            static_artifacts = _static_artifacts_for_turn(task, turn)
+            expected_support_ids = _expected_support_ids(task.suite, static_artifacts, prior_dynamic)
+            scorer, scorer_payload = _scorer_for_turn(turn)
+            strand = _suite_strand(task.suite, turn.turn_index)
+            metadata = {
+                **task.metadata,
+                **turn.metadata,
+                "source_dataset": corpus.dataset_name,
+                "source_revision": corpus.revision,
+                "task_background_count": len(task.background_items),
+                "turn_background_count": len(turn.background_items),
+            }
+            for family in DERIVED_FAMILIES:
+                cases.append(
+                    MemoryArenaDerivedCase(
+                        case_id=f"{family}:{task.suite}:{task.task_id}:turn_{turn.turn_index}",
+                        family=family,
+                        suite=task.suite,
+                        strand=strand,
+                        task_id=task.task_id,
+                        turn_index=turn.turn_index,
+                        question=turn.question,
+                        gold_answer_text=turn.gold_answer_text,
+                        gold_answer_value=turn.gold_answer_value,
+                        static_artifacts=[_artifact_to_dict(item) for item in static_artifacts],
+                        dynamic_artifacts_before_turn=[_artifact_to_dict(item) for item in prior_dynamic],
+                        expected_support_ids=list(expected_support_ids),
+                        scorer=scorer,
+                        scorer_payload=scorer_payload,
+                        metadata=metadata,
+                    )
+                )
+            prior_dynamic.append(_build_dynamic_artifact(task, turn))
+    return MemoryArenaDerivedManifest(
+        manifest_version=DERIVED_MANIFEST_VERSION,
+        dataset_name=corpus.dataset_name,
+        revision=corpus.revision,
+        source=corpus.source,
+        suites=corpus.suites,
+        counts=corpus.counts,
+        cases=cases,
+    )
+
+
+def _normalise_family_selection(family: str | None) -> list[str]:
+    selected = (family or "all").strip()
+    if selected == "all":
+        return list(DERIVED_FAMILIES)
+    if selected not in DERIVED_FAMILIES:
+        raise KeyError(f"Unknown MemoryArena family: {selected}")
+    return [selected]
+
+
+def select_memoryarena_cases(
+    manifest: MemoryArenaDerivedManifest,
+    *,
+    family: str | None = None,
+    suites: list[str] | None = None,
+    strands: list[str] | None = None,
+) -> list[MemoryArenaDerivedCase]:
+    selected_families = set(_normalise_family_selection(family))
+    selected_suites = set(suites or [])
+    selected_strands = set(strands or [])
+    return [
+        case
+        for case in manifest.cases
+        if case.family in selected_families
+        and (not selected_suites or case.suite in selected_suites)
+        and (not selected_strands or case.strand in selected_strands)
+    ]
+
+
+def materialize_memoryarena_derived_manifest(
+    corpus: MemoryArenaCorpus,
+    *,
+    artifact_root: Path = DEFAULT_ARTIFACT_ROOT,
+) -> dict[str, Any]:
+    manifest = build_memoryarena_derived_manifest(corpus)
+    derived_root = artifact_root / "derived"
+    derived_root.mkdir(parents=True, exist_ok=True)
+    family_paths: dict[str, str] = {}
+    family_counts: dict[str, int] = {}
+    for family in DERIVED_FAMILIES:
+        family_cases = [case for case in manifest.cases if case.family == family]
+        family_counts[family] = len(family_cases)
+        path = derived_root / f"{family}.jsonl"
+        with path.open("w", encoding="utf-8") as handle:
+            for case in family_cases:
+                handle.write(json.dumps(_case_to_dict(case), ensure_ascii=True) + "\n")
+        family_paths[family] = str(path)
+    summary = {
+        "manifest_version": manifest.manifest_version,
+        "dataset_name": manifest.dataset_name,
+        "revision": manifest.revision,
+        "source": manifest.source,
+        "suites": manifest.suites,
+        "available_counts": manifest.counts,
+        "family_counts": family_counts,
+        "suite_case_counts": {
+            suite: sum(1 for case in manifest.cases if case.suite == suite)
+            for suite in manifest.suites
+        },
+        "strand_case_counts": {
+            strand: sum(1 for case in manifest.cases if case.strand == strand)
+            for strand in sorted({case.strand for case in manifest.cases})
+        },
+    }
+    summary_path = derived_root / "summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "derived_root": str(derived_root),
+        "summary_path": str(summary_path),
+        "summary": summary,
+        "files": family_paths,
+    }
+
+
 def _content_to_text(item: dict[str, Any]) -> str:
     return str(item.get("content") or item.get("text") or "")
 
@@ -352,13 +690,26 @@ def _summary_from_cases(mode: str, cases: list[dict[str, Any]]) -> dict[str, Any
     return {
         "mode": mode,
         "case_count": len(cases),
+        "family_case_counts": {
+            family: sum(1 for case in cases if case.get("family") == family)
+            for family in sorted({case.get("family") for case in cases if case.get("family") is not None})
+        },
         "suite_case_counts": {
             suite: sum(1 for case in cases if case["suite"] == suite)
             for suite in sorted({case["suite"] for case in cases})
         },
+        "strand_case_counts": {
+            strand: sum(1 for case in cases if case.get("strand") == strand)
+            for strand in sorted({case.get("strand") for case in cases if case.get("strand") is not None})
+        },
         "support_recall_at_5": _safe_mean([case.get("support_recall_at_5") for case in cases]),
         "support_precision_at_5": _safe_mean([case.get("support_precision_at_5") for case in cases]),
+        "support_recall_at_k": _safe_mean([case.get("support_recall_at_k") for case in cases]),
+        "support_precision_at_k": _safe_mean([case.get("support_precision_at_k") for case in cases]),
         "prompt_support_coverage": _safe_mean([case.get("prompt_support_coverage") for case in cases]),
+        "write_success_rate": _safe_mean([case.get("write_success_rate") for case in cases]),
+        "deferred_recall_at_5": _safe_mean([case.get("deferred_recall_at_5") for case in cases]),
+        "deferred_recall_at_k": _safe_mean([case.get("deferred_recall_at_k") for case in cases]),
         "token_f1": _safe_mean([case.get("token_f1") for case in cases]),
         "exact_match_rate": _safe_mean([1.0 if case.get("exact_match") else 0.0 for case in ok_cases]),
         "field_coverage": _safe_mean([case.get("field_coverage") for case in ok_cases]),
@@ -410,138 +761,771 @@ def _write_artifacts(
     return output_dir
 
 
+def _artifact_map(case: MemoryArenaDerivedCase) -> dict[str, dict[str, Any]]:
+    return {
+        artifact["artifact_id"]: artifact
+        for artifact in [*case.static_artifacts, *case.dynamic_artifacts_before_turn]
+    }
+
+
+def _expected_support_for_case(case: MemoryArenaDerivedCase) -> list[dict[str, Any]]:
+    artifacts = _artifact_map(case)
+    return [artifacts[artifact_id] for artifact_id in case.expected_support_ids if artifact_id in artifacts]
+
+
+def _dynamic_artifact_for_case(case: MemoryArenaDerivedCase) -> dict[str, Any]:
+    if case.suite == "bundled_shopping":
+        text = _shopping_answer_artifact_text(case.gold_answer_value)
+        kind = "shopping_selection"
+    elif case.suite == "group_travel_planner":
+        text = f"Traveler plan:\n{serialise_answer(case.gold_answer_value)}"
+        kind = "travel_plan"
+    elif case.suite in {"formal_reasoning_math", "formal_reasoning_phys"}:
+        paper_name = case.metadata.get("paper_name")
+        prefix = f"{paper_name}: " if paper_name else ""
+        text = f"{prefix}{case.gold_answer_text}".strip()
+        kind = "reasoning_answer"
+    else:
+        text = case.gold_answer_text
+        kind = "search_result"
+    return _artifact_to_dict(
+        MemoryArenaArtifact(
+            artifact_id=f"{case.suite}:{case.task_id}:dynamic:turn_{case.turn_index}",
+            kind=kind,
+            text=text,
+            value=case.gold_answer_value,
+            metadata={"suite": case.suite, "task_id": case.task_id, "turn_index": case.turn_index},
+        )
+    )
+
+
+def _dedupe_artifacts(artifacts: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: dict[str, dict[str, Any]] = {}
+    for artifact in artifacts:
+        deduped.setdefault(artifact["artifact_id"], artifact)
+    return list(deduped.values())
+
+
+def _case_corpus_artifacts(case: MemoryArenaDerivedCase) -> list[dict[str, Any]]:
+    return _dedupe_artifacts([*case.static_artifacts, *case.dynamic_artifacts_before_turn, _dynamic_artifact_for_case(case)])
+
+
+def _compact_trace(run_id: str, step_result: dict[str, Any]) -> dict[str, Any]:
+    debug = list(step_result.get("debug") or [])
+    return {
+        "run_id": run_id,
+        "mode": "summary",
+        "steps": [
+            {
+                "step_index": step_result.get("step_index"),
+                "activation_count": len(debug),
+                "working_memory_count": len(step_result.get("working_memory") or []),
+                "top_activation": debug[:SUPPORT_K],
+            }
+        ],
+    }
+
+
+def _should_capture_failure_trace(case_payload: dict[str, Any]) -> bool:
+    if case_payload.get("status") != "ok":
+        return True
+    recall = case_payload.get("support_recall_at_k")
+    if recall is not None and recall < 1.0:
+        return True
+    coverage = case_payload.get("prompt_support_coverage")
+    return coverage is not None and coverage < 1.0
+
+
+def _attach_trace(
+    engine: MemoryEngine,
+    *,
+    run_id: str,
+    step_result: dict[str, Any],
+    trace_mode: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    if trace_mode == "full" or (trace_mode == "failures" and _should_capture_failure_trace(payload)):
+        payload["trace"] = engine.get_debug_trace(run_id)
+    else:
+        payload["trace"] = _compact_trace(run_id, step_result)
+    return payload
+
+
+def _dynamic_expected_support_for_case(case: MemoryArenaDerivedCase) -> list[dict[str, Any]]:
+    dynamic_ids = {artifact["artifact_id"] for artifact in case.dynamic_artifacts_before_turn}
+    artifacts = _artifact_map(case)
+    return [
+        artifacts[artifact_id]
+        for artifact_id in case.expected_support_ids
+        if artifact_id in dynamic_ids and artifact_id in artifacts
+    ]
+
+
+def _artifact_messages(case: MemoryArenaDerivedCase, artifacts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    messages: list[dict[str, Any]] = []
+    static_ids = {artifact["artifact_id"] for artifact in case.static_artifacts}
+    for artifact in artifacts:
+        is_static = artifact["artifact_id"] in static_ids
+        messages.append(
+            {
+                "role": "system" if is_static else "assistant",
+                "source_type": "system_note" if is_static else "agent_message",
+                "content": artifact["text"],
+                "metadata_json": {
+                    "suite": case.suite,
+                    "task_id": case.task_id,
+                    "turn_index": case.turn_index,
+                    "artifact_id": artifact["artifact_id"],
+                    "artifact_kind": artifact["kind"],
+                    "benchmark_family": case.family,
+                },
+            }
+        )
+    return messages
+
+
+def _support_metrics(case: MemoryArenaDerivedCase, working_memory: list[dict[str, Any]], prompt_addition: str) -> dict[str, Any]:
+    expected_support = _expected_support_for_case(case)
+    dynamic_support = _dynamic_expected_support_for_case(case)
+    top_items = working_memory[:SUPPORT_K]
+    hit_count = sum(
+        1
+        for artifact in expected_support
+        if any(_artifact_hit(artifact["text"].lower(), _content_to_text(item).lower()) for item in top_items)
+    )
+    prompt_hits = sum(
+        1 for artifact in expected_support if _artifact_hit(artifact["text"].lower(), prompt_addition.lower())
+    )
+    dynamic_hits = sum(
+        1
+        for artifact in dynamic_support
+        if any(_artifact_hit(artifact["text"].lower(), _content_to_text(item).lower()) for item in top_items)
+    )
+    return {
+        "expected_support": expected_support,
+        "support_expected_count": len(expected_support),
+        "support_recall_at_5": (hit_count / len(expected_support) if expected_support else None),
+        "support_precision_at_5": (hit_count / min(len(top_items), SUPPORT_K)) if top_items else None,
+        "support_recall_at_k": (hit_count / len(expected_support) if expected_support else None),
+        "support_precision_at_k": (hit_count / min(len(top_items), SUPPORT_K)) if top_items else None,
+        "prompt_support_coverage": (prompt_hits / len(expected_support) if expected_support else None),
+        "deferred_recall_at_5": (dynamic_hits / len(dynamic_support) if dynamic_support else None),
+        "deferred_recall_at_k": (dynamic_hits / len(dynamic_support) if dynamic_support else None),
+    }
+
+
+def _write_success(
+    engine: MemoryEngine,
+    *,
+    namespace_id: str,
+    artifact: dict[str, Any] | None,
+) -> float | None:
+    if artifact is None:
+        return None
+    results = engine.search(artifact["text"], namespace_id=namespace_id, limit=SUPPORT_K)
+    success = any(_artifact_hit(artifact["text"].lower(), _content_to_text(item).lower()) for item in results)
+    return 1.0 if success else 0.0
+
+
+def _offline_case_payload(
+    case: MemoryArenaDerivedCase,
+    *,
+    working_memory: list[dict[str, Any]],
+    prompt_addition: str,
+    latency_ms: float,
+    trace: dict[str, Any],
+    write_success_rate: float | None = None,
+) -> dict[str, Any]:
+    metrics = _support_metrics(case, working_memory, prompt_addition)
+    return {
+        "mode": "memoryarena_offline",
+        "status": "ok",
+        "case_id": case.case_id,
+        "family": case.family,
+        "suite": case.suite,
+        "strand": case.strand,
+        "task_id": case.task_id,
+        "turn_index": case.turn_index,
+        "question": case.question,
+        "gold_answer_text": case.gold_answer_text,
+        "expected_support_ids": case.expected_support_ids,
+        "expected_support": metrics["expected_support"],
+        "working_memory": working_memory,
+        "prompt_addition": prompt_addition,
+        "support_expected_count": metrics["support_expected_count"],
+        "support_recall_at_5": metrics["support_recall_at_5"],
+        "support_precision_at_5": metrics["support_precision_at_5"],
+        "support_recall_at_k": metrics["support_recall_at_k"],
+        "support_precision_at_k": metrics["support_precision_at_k"],
+        "prompt_support_coverage": metrics["prompt_support_coverage"],
+        "deferred_recall_at_5": metrics["deferred_recall_at_5"],
+        "deferred_recall_at_k": metrics["deferred_recall_at_k"],
+        "write_success_rate": write_success_rate,
+        "prompt_token_count": word_count(prompt_addition),
+        "latency_ms": latency_ms,
+        "trace": trace,
+    }
+
+
+def _agent_case_payload(
+    case: MemoryArenaDerivedCase,
+    *,
+    reply_text: str,
+    prompt_addition: str,
+    latency_ms: float | None,
+    run_id: str,
+) -> dict[str, Any]:
+    scored = _score_live_case(
+        suite=case.suite,
+        gold_answer_text=case.gold_answer_text,
+        gold_answer_value=case.gold_answer_value,
+        reply_text=reply_text,
+    )
+    return {
+        "mode": "memoryarena_agent",
+        "status": "ok",
+        "case_id": case.case_id,
+        "family": case.family,
+        "suite": case.suite,
+        "strand": case.strand,
+        "task_id": case.task_id,
+        "turn_index": case.turn_index,
+        "question": case.question,
+        "gold_answer_text": case.gold_answer_text,
+        "reply_text": reply_text,
+        "token_f1": scored["token_f1"],
+        "exact_match": scored["exact_match"],
+        "field_coverage": scored.get("field_coverage"),
+        "prompt_addition": prompt_addition,
+        "prompt_token_count": word_count(prompt_addition),
+        "latency_ms": latency_ms,
+        "run_id": run_id,
+    }
+
+
+def _set_workbench_replay_response(workbench, run_id: str, response_text: str) -> None:
+    from memoria.db import session_scope
+    from memoria.models import ExperimentRun
+
+    with session_scope(workbench.engine.session_factory) as session:
+        run = session.get(ExperimentRun, run_id)
+        if run is None:
+            raise KeyError(f"Unknown run_id: {run_id}")
+        provider_config = dict(run.config_json.get("provider") or {})
+        provider_config["replay_responses"] = [response_text]
+        run.config_json = {
+            **run.config_json,
+            "provider": provider_config,
+        }
+        session.add(run)
+
+
+def evaluate_memoryarena_offline(
+    engine: MemoryEngine,
+    manifest: MemoryArenaDerivedManifest,
+    *,
+    family: str = "all",
+    suites: list[str] | None = None,
+    strands: list[str] | None = None,
+    artifact_root: Path | None = None,
+    prompt_limit: int = 4,
+    strategy: str = "hybrid",
+    trace_mode: str = "summary",
+    jobs: int | str = 1,
+) -> dict[str, Any]:
+    if strategy not in OFFLINE_STRATEGIES:
+        raise KeyError(f"Unknown offline strategy: {strategy}")
+    if trace_mode not in OFFLINE_TRACE_MODES:
+        raise KeyError(f"Unknown offline trace mode: {trace_mode}")
+    worker_count = _normalise_offline_jobs(jobs)
+    selected_cases = sorted(
+        select_memoryarena_cases(manifest, family=family, suites=suites, strands=strands),
+        key=lambda case: (case.family, case.suite, case.task_id, case.turn_index),
+    )
+    if worker_count > 1 and selected_cases:
+        grouped_cases: dict[tuple[str, str], list[MemoryArenaDerivedCase]] = {}
+        for case in selected_cases:
+            grouped_cases.setdefault((case.suite, case.task_id), []).append(case)
+        task_groups = list(grouped_cases.values())
+        worker_count = min(worker_count, len(task_groups))
+        chunks = [task_groups[index::worker_count] for index in range(worker_count)]
+
+        def run_chunk(worker_index: int, chunk: list[list[MemoryArenaDerivedCase]], temp_root: Path) -> dict[str, Any]:
+            worker_cases = [case for group in chunk for case in group]
+            worker_config = engine.config.model_copy(deep=True)
+            worker_config.database_url = f"sqlite:///{temp_root / f'worker-{worker_index}.db'}"
+            worker_engine = MemoryEngine(config=worker_config)
+            worker_manifest = MemoryArenaDerivedManifest(
+                manifest_version=manifest.manifest_version,
+                dataset_name=manifest.dataset_name,
+                revision=manifest.revision,
+                source=manifest.source,
+                suites=manifest.suites,
+                counts=manifest.counts,
+                cases=worker_cases,
+            )
+            return evaluate_memoryarena_offline(
+                worker_engine,
+                worker_manifest,
+                family="all",
+                suites=None,
+                strands=None,
+                artifact_root=None,
+                prompt_limit=prompt_limit,
+                strategy=strategy,
+                trace_mode=trace_mode,
+                jobs=1,
+            )
+
+        with TemporaryDirectory(prefix="memoria-memoryarena-offline-") as temp_dir:
+            temp_root = Path(temp_dir)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                worker_results = list(
+                    executor.map(
+                        lambda item: run_chunk(item[0], item[1], temp_root),
+                        enumerate(chunks),
+                    )
+                )
+        family_order = {"learn_as_you_act": 0, "snapshot_lookup": 1}
+        cases = [
+            case
+            for result in worker_results
+            for case in result["cases"]
+        ]
+        cases.sort(key=lambda case: (family_order.get(case.get("family"), 9), case["suite"], case["task_id"], case["turn_index"]))
+        summary = _summary_from_cases("memoryarena_offline", cases)
+        coverage_values = [
+            case.get("corpus_learned_coverage")
+            for case in cases
+            if case.get("corpus_learned_coverage") is not None
+        ]
+        if coverage_values:
+            summary["corpus_learned_coverage"] = _safe_mean(coverage_values)
+            summary["corpus_backfilled_artifact_count"] = sum(
+                int(result["summary"].get("corpus_backfilled_artifact_count") or 0)
+                for result in worker_results
+            )
+        config = {
+            "manifest_version": manifest.manifest_version,
+            "dataset_name": manifest.dataset_name,
+            "revision": manifest.revision,
+            "source": manifest.source,
+            "suites": manifest.suites,
+            "available_counts": manifest.counts,
+            "selected_family": family,
+            "selected_suites": suites or [],
+            "selected_strands": strands or [],
+            "selected_case_count": len(selected_cases),
+            "prompt_limit": prompt_limit,
+            "strategy": strategy,
+            "trace_mode": trace_mode,
+            "jobs": jobs,
+            "worker_count": worker_count,
+        }
+        artifact_dir = None
+        if artifact_root is not None:
+            artifact_dir = _write_artifacts(
+                artifact_root=artifact_root,
+                mode="memoryarena_offline",
+                summary=summary,
+                cases=cases,
+                config=config,
+            )
+        return {
+            "summary": summary,
+            "cases": cases,
+            "config": config,
+            "artifact_dir": str(artifact_dir) if artifact_dir is not None else None,
+        }
+    cases: list[dict[str, Any]] = []
+
+    grouped_learn_cases: dict[tuple[str, str], list[MemoryArenaDerivedCase]] = {}
+    for case in selected_cases:
+        if case.family == "learn_as_you_act":
+            grouped_learn_cases.setdefault((case.suite, case.task_id), []).append(case)
+
+    task_states: dict[tuple[str, str], dict[str, Any]] = {}
+    hybrid_backfilled_artifact_count = 0
+
+    def evaluate_case(
+        case: MemoryArenaDerivedCase,
+        *,
+        namespace_id: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        run_ctx = engine.start_run(
+            namespace_id=namespace_id,
+            user_id="memoryarena",
+            agent_id="offline",
+            session_id=session_id,
+        )
+        started_at = perf_counter()
+        step_result = engine.process_step_result(
+            run_ctx["run_id"],
+            step_type="user_input",
+            text=case.question,
+            metadata={"case_id": case.case_id, "family": case.family, "suite": case.suite},
+        )
+        latency_ms = (perf_counter() - started_at) * 1000.0
+        working_memory = step_result["working_memory"]
+        prompt_addition = _prompt_addition(working_memory, limit=prompt_limit)
+        payload = _offline_case_payload(
+            case,
+            working_memory=working_memory,
+            prompt_addition=prompt_addition,
+            latency_ms=latency_ms,
+            trace={},
+        )
+        return _attach_trace(
+            engine,
+            run_id=run_ctx["run_id"],
+            step_result=step_result,
+            trace_mode=trace_mode,
+            payload=payload,
+        )
+
+    def load_missing_artifacts(
+        case: MemoryArenaDerivedCase,
+        *,
+        namespace_id: str,
+        session_id: str,
+        loaded_artifact_ids: set[str],
+        artifacts: list[dict[str, Any]],
+    ) -> int:
+        missing = [artifact for artifact in _dedupe_artifacts(artifacts) if artifact["artifact_id"] not in loaded_artifact_ids]
+        if not missing:
+            return 0
+        engine.add_messages(
+            _artifact_messages(case, missing),
+            namespace_id=namespace_id,
+            user_id="memoryarena",
+            agent_id="offline",
+            session_id=session_id,
+        )
+        engine.consolidate(namespace_id=namespace_id)
+        loaded_artifact_ids.update(artifact["artifact_id"] for artifact in missing)
+        return len(missing)
+
+    for (suite, task_id), task_cases in grouped_learn_cases.items():
+        ordered_cases = sorted(task_cases, key=lambda item: item.turn_index)
+        namespace_id = f"memoryarena.offline.learn.{suite}.{task_id}"
+        session_id = f"learn:{suite}:{task_id}"
+        loaded_artifact_ids: set[str] = set()
+        for case in ordered_cases:
+            load_missing_artifacts(
+                case,
+                namespace_id=namespace_id,
+                session_id=session_id,
+                loaded_artifact_ids=loaded_artifact_ids,
+                artifacts=[*case.static_artifacts, *case.dynamic_artifacts_before_turn],
+            )
+            current_artifact_dict = _dynamic_artifact_for_case(case)
+            payload = evaluate_case(
+                case,
+                namespace_id=namespace_id,
+                session_id=session_id,
+            )
+            engine.add_messages(
+                _artifact_messages(case, [current_artifact_dict]),
+                namespace_id=namespace_id,
+                user_id="memoryarena",
+                agent_id="offline",
+                session_id=session_id,
+            )
+            engine.consolidate(namespace_id=namespace_id)
+            loaded_artifact_ids.add(current_artifact_dict["artifact_id"])
+            payload["write_success_rate"] = _write_success(
+                engine,
+                namespace_id=namespace_id,
+                artifact=current_artifact_dict,
+            )
+            cases.append(payload)
+        task_states[(suite, task_id)] = {
+            "namespace_id": namespace_id,
+            "session_id": session_id,
+            "loaded_artifact_ids": loaded_artifact_ids,
+            "learned_artifact_ids": set(loaded_artifact_ids),
+        }
+
+    snapshot_cases = [case for case in selected_cases if case.family == "snapshot_lookup"]
+    if strategy == "legacy":
+        for case in snapshot_cases:
+            namespace_id = f"memoryarena.offline.snapshot.{case.suite}.{case.task_id}.turn_{case.turn_index}"
+            session_id = case.case_id
+            artifacts_to_load = [*case.static_artifacts, *case.dynamic_artifacts_before_turn]
+            if artifacts_to_load:
+                engine.add_messages(
+                    _artifact_messages(case, artifacts_to_load),
+                    namespace_id=namespace_id,
+                    user_id="memoryarena",
+                    agent_id="offline",
+                    session_id=session_id,
+                )
+                engine.consolidate(namespace_id=namespace_id)
+            cases.append(evaluate_case(case, namespace_id=namespace_id, session_id=session_id))
+    else:
+        grouped_snapshot_cases: dict[tuple[str, str], list[MemoryArenaDerivedCase]] = {}
+        for case in snapshot_cases:
+            grouped_snapshot_cases.setdefault((case.suite, case.task_id), []).append(case)
+        all_task_cases: dict[tuple[str, str], list[MemoryArenaDerivedCase]] = {}
+        for case in selected_cases:
+            all_task_cases.setdefault((case.suite, case.task_id), []).append(case)
+        for (suite, task_id), task_cases in grouped_snapshot_cases.items():
+            ordered_cases = sorted(task_cases, key=lambda item: item.turn_index)
+            state = task_states.get((suite, task_id))
+            if state is None:
+                state = {
+                    "namespace_id": f"memoryarena.offline.hybrid.{suite}.{task_id}",
+                    "session_id": f"hybrid:{suite}:{task_id}",
+                    "loaded_artifact_ids": set(),
+                    "learned_artifact_ids": set(),
+                }
+                task_states[(suite, task_id)] = state
+            expected_artifacts = _dedupe_artifacts(
+                artifact
+                for task_case in all_task_cases.get((suite, task_id), ordered_cases)
+                for artifact in _case_corpus_artifacts(task_case)
+            )
+            learned_ids = set(state["learned_artifact_ids"])
+            expected_ids = {artifact["artifact_id"] for artifact in expected_artifacts}
+            backfilled_count = load_missing_artifacts(
+                ordered_cases[-1],
+                namespace_id=state["namespace_id"],
+                session_id=state["session_id"],
+                loaded_artifact_ids=state["loaded_artifact_ids"],
+                artifacts=expected_artifacts,
+            )
+            hybrid_backfilled_artifact_count += backfilled_count
+            coverage_rate = len(learned_ids & expected_ids) / len(expected_ids) if expected_ids else None
+            for case in ordered_cases:
+                payload = evaluate_case(
+                    case,
+                    namespace_id=state["namespace_id"],
+                    session_id=case.case_id,
+                )
+                payload["corpus_expected_artifact_count"] = len(expected_ids)
+                payload["corpus_learned_artifact_count"] = len(learned_ids & expected_ids)
+                payload["corpus_learned_coverage"] = coverage_rate
+                payload["corpus_backfilled_artifact_count"] = backfilled_count
+                cases.append(payload)
+
+    summary = _summary_from_cases("memoryarena_offline", cases)
+    coverage_values = [
+        case.get("corpus_learned_coverage")
+        for case in cases
+        if case.get("corpus_learned_coverage") is not None
+    ]
+    if coverage_values:
+        summary["corpus_learned_coverage"] = _safe_mean(coverage_values)
+        summary["corpus_backfilled_artifact_count"] = hybrid_backfilled_artifact_count
+    config = {
+        "manifest_version": manifest.manifest_version,
+        "dataset_name": manifest.dataset_name,
+        "revision": manifest.revision,
+        "source": manifest.source,
+        "suites": manifest.suites,
+        "available_counts": manifest.counts,
+        "selected_family": family,
+        "selected_suites": suites or [],
+        "selected_strands": strands or [],
+        "selected_case_count": len(selected_cases),
+        "prompt_limit": prompt_limit,
+        "strategy": strategy,
+        "trace_mode": trace_mode,
+        "jobs": jobs,
+    }
+    artifact_dir = None
+    if artifact_root is not None:
+        artifact_dir = _write_artifacts(
+            artifact_root=artifact_root,
+            mode="memoryarena_offline",
+            summary=summary,
+            cases=cases,
+            config=config,
+        )
+    return {
+        "summary": summary,
+        "cases": cases,
+        "config": config,
+        "artifact_dir": str(artifact_dir) if artifact_dir is not None else None,
+    }
+
+
 def evaluate_memoryarena_proxy(
     engine: MemoryEngine,
     corpus: MemoryArenaCorpus,
     *,
     artifact_root: Path | None = None,
     prompt_limit: int = 4,
+    family: str = "all",
+    strands: list[str] | None = None,
 ) -> dict[str, Any]:
+    manifest = build_memoryarena_derived_manifest(corpus)
+    return evaluate_memoryarena_offline(
+        engine,
+        manifest,
+        family=family,
+        suites=corpus.suites,
+        strands=strands,
+        artifact_root=artifact_root,
+        prompt_limit=prompt_limit,
+    )
+
+
+def evaluate_memoryarena_agent(
+    workbench,
+    manifest: MemoryArenaDerivedManifest,
+    *,
+    provider_config: Any,
+    family: str = "all",
+    suites: list[str] | None = None,
+    strands: list[str] | None = None,
+    artifact_root: Path | None = None,
+    prompt_limit: int = 4,
+) -> dict[str, Any]:
+    from memoria.workbench import RunSpec
+
+    selected_cases = sorted(
+        select_memoryarena_cases(manifest, family=family, suites=suites, strands=strands),
+        key=lambda case: (case.family, case.suite, case.task_id, case.turn_index),
+    )
     cases: list[dict[str, Any]] = []
-    for task in corpus.tasks:
-        namespace_id = f"memoryarena.proxy.{task.suite}.{task.task_id}"
-        session_id = f"{task.suite}-{task.task_id}"
-        if task.background_items:
-            engine.add_messages(
-                [
-                    {
-                        "role": "system",
-                        "source_type": "system_note",
-                        "content": item,
-                        "metadata_json": {
-                            "suite": task.suite,
-                            "task_id": task.task_id,
-                            "kind": "background",
-                        },
-                    }
-                    for item in task.background_items
-                ],
-                namespace_id=namespace_id,
-                user_id="memoryarena",
-                agent_id="proxy",
-                session_id=session_id,
-            )
-            engine.consolidate(namespace_id=namespace_id)
-        run_ctx = engine.start_run(
-            namespace_id=namespace_id,
-            user_id="memoryarena",
-            agent_id="proxy",
-            session_id=session_id,
-        )
-        prior_artifacts = [
-            {
-                "artifact_id": f"background-{idx}",
-                "kind": "background",
-                "text": background,
-            }
-            for idx, background in enumerate(task.background_items)
-        ]
-        for turn in task.turns:
-            started_at = perf_counter()
-            working_memory = engine.process_step(
-                run_ctx["run_id"],
-                step_type="user_input",
-                text=turn.question,
-                metadata={"suite": task.suite, "task_id": task.task_id, "turn_index": turn.turn_index},
-            )
-            latency_ms = (perf_counter() - started_at) * 1000.0
-            prompt_addition = _prompt_addition(working_memory, limit=prompt_limit)
-            expected_support = _expected_support_artifacts(prior_artifacts, turn.gold_answer_text)
-            top_items = working_memory[:5]
-            hit_count = sum(
-                1
-                for artifact in expected_support
-                if any(_artifact_hit(artifact.text.lower(), _content_to_text(item).lower()) for item in top_items)
-            )
-            prompt_hits = sum(
-                1 for artifact in expected_support if _artifact_hit(artifact.text.lower(), prompt_addition.lower())
-            )
-            case = {
-                "mode": "memoryarena_proxy",
-                "status": "ok",
-                "suite": task.suite,
-                "task_id": task.task_id,
-                "turn_index": turn.turn_index,
-                "question": turn.question,
-                "gold_answer_text": turn.gold_answer_text,
-                "expected_support": [asdict(artifact) for artifact in expected_support],
-                "working_memory": working_memory,
-                "prompt_addition": prompt_addition,
-                "support_expected_count": len(expected_support),
-                "support_recall_at_5": (
-                    hit_count / len(expected_support) if expected_support else None
-                ),
-                "support_precision_at_5": (hit_count / min(len(top_items), 5)) if top_items else None,
-                "prompt_support_coverage": (
-                    prompt_hits / len(expected_support) if expected_support else None
-                ),
-                "prompt_token_count": word_count(prompt_addition),
-                "latency_ms": latency_ms,
-                "trace": engine.get_debug_trace(run_ctx["run_id"]),
-            }
-            cases.append(case)
-            engine.add_messages(
-                [
-                    {
-                        "role": "assistant",
-                        "source_type": "agent_message",
-                        "content": turn.gold_answer_text,
-                        "metadata_json": {
-                            "suite": task.suite,
-                            "task_id": task.task_id,
-                            "turn_index": turn.turn_index,
-                            "kind": "teacher_forced_answer",
-                        },
-                    }
-                ],
-                namespace_id=namespace_id,
-                user_id="memoryarena",
-                agent_id="proxy",
-                session_id=session_id,
-            )
-            engine.consolidate(namespace_id=namespace_id)
-            prior_artifacts.append(
-                {
-                    "artifact_id": f"answer-{turn.turn_index}",
-                    "kind": "gold_answer",
-                    "text": turn.gold_answer_text,
+
+    snapshot_cases = [case for case in selected_cases if case.family == "snapshot_lookup"]
+    for case in snapshot_cases:
+        run_provider = provider_config
+        if provider_config.provider_type == "replay":
+            run_provider = type(provider_config)(
+                **{
+                    **provider_config.__dict__,
+                    "replay_responses": [case.gold_answer_text],
                 }
             )
-    summary = _summary_from_cases("memoryarena_proxy", cases)
+        run = workbench.create_run(
+            RunSpec(
+                title=f"MemoryArena {case.case_id}",
+                provider=run_provider,
+                namespace_id=f"memoryarena.agent.snapshot.{case.suite}.{case.task_id}.turn_{case.turn_index}",
+                user_id="memoryarena",
+                agent_id="agent-eval",
+                session_id=case.case_id,
+                system_prompt="Answer the benchmark question directly.",
+                prompt_limit=prompt_limit,
+                metadata={"case_id": case.case_id, "family": case.family},
+            )
+        )
+        artifacts_to_load = [*case.static_artifacts, *case.dynamic_artifacts_before_turn]
+        if artifacts_to_load:
+            workbench.engine.add_messages(
+                _artifact_messages(case, artifacts_to_load),
+                namespace_id=run["namespace_id"],
+                user_id=run["user_id"],
+                agent_id=run["agent_id"],
+                session_id=run["session_id"],
+            )
+            workbench.engine.consolidate(namespace_id=run["namespace_id"])
+        if provider_config.provider_type == "replay":
+            _set_workbench_replay_response(workbench, run["id"], case.gold_answer_text)
+        turn = workbench.send_user_message(run["id"], case.question)
+        cases.append(
+            _agent_case_payload(
+                case,
+                reply_text=turn["turn"]["assistant_message"],
+                prompt_addition=turn["turn"]["prompt_addition"],
+                latency_ms=turn["turn"]["latency_ms"],
+                run_id=run["id"],
+            )
+        )
+
+    grouped_learn_cases: dict[tuple[str, str], list[MemoryArenaDerivedCase]] = {}
+    for case in selected_cases:
+        if case.family == "learn_as_you_act":
+            grouped_learn_cases.setdefault((case.suite, case.task_id), []).append(case)
+    for (suite, task_id), task_cases in grouped_learn_cases.items():
+        ordered_cases = sorted(task_cases, key=lambda item: item.turn_index)
+        run_provider = provider_config
+        if provider_config.provider_type == "replay":
+            run_provider = type(provider_config)(
+                **{
+                    **provider_config.__dict__,
+                    "replay_responses": [case.gold_answer_text for case in ordered_cases],
+                }
+            )
+        first_case = ordered_cases[0]
+        run = workbench.create_run(
+            RunSpec(
+                title=f"MemoryArena learn {suite}:{task_id}",
+                provider=run_provider,
+                namespace_id=f"memoryarena.agent.learn.{suite}.{task_id}",
+                user_id="memoryarena",
+                agent_id="agent-eval",
+                session_id=f"learn:{suite}:{task_id}",
+                system_prompt="Answer the benchmark question directly.",
+                prompt_limit=prompt_limit,
+                metadata={"suite": suite, "task_id": task_id, "family": "learn_as_you_act"},
+            )
+        )
+        loaded_artifact_ids: set[str] = set()
+        if first_case.static_artifacts:
+            workbench.engine.add_messages(
+                _artifact_messages(first_case, first_case.static_artifacts),
+                namespace_id=run["namespace_id"],
+                user_id=run["user_id"],
+                agent_id=run["agent_id"],
+                session_id=run["session_id"],
+            )
+            workbench.engine.consolidate(namespace_id=run["namespace_id"])
+            loaded_artifact_ids.update(artifact["artifact_id"] for artifact in first_case.static_artifacts)
+        for case in ordered_cases:
+            missing_dynamic = [
+                artifact
+                for artifact in case.dynamic_artifacts_before_turn
+                if artifact["artifact_id"] not in loaded_artifact_ids
+            ]
+            if missing_dynamic:
+                workbench.engine.add_messages(
+                    _artifact_messages(case, missing_dynamic),
+                    namespace_id=run["namespace_id"],
+                    user_id=run["user_id"],
+                    agent_id=run["agent_id"],
+                    session_id=run["session_id"],
+                )
+                workbench.engine.consolidate(namespace_id=run["namespace_id"])
+                loaded_artifact_ids.update(artifact["artifact_id"] for artifact in missing_dynamic)
+            if provider_config.provider_type == "replay":
+                _set_workbench_replay_response(workbench, run["id"], case.gold_answer_text)
+            turn = workbench.send_user_message(run["id"], case.question)
+            loaded_artifact_ids.add(f"{case.suite}:{case.task_id}:dynamic:turn_{case.turn_index}")
+            cases.append(
+                _agent_case_payload(
+                    case,
+                    reply_text=turn["turn"]["assistant_message"],
+                    prompt_addition=turn["turn"]["prompt_addition"],
+                    latency_ms=turn["turn"]["latency_ms"],
+                    run_id=run["id"],
+                )
+            )
+
+    summary = _summary_from_cases("memoryarena_agent", cases)
     config = {
-        "dataset_name": corpus.dataset_name,
-        "revision": corpus.revision,
-        "source": corpus.source,
-        "suites": corpus.suites,
-        "available_counts": corpus.counts,
-        "selected_counts": _selected_counts(corpus),
+        "manifest_version": manifest.manifest_version,
+        "dataset_name": manifest.dataset_name,
+        "revision": manifest.revision,
+        "source": manifest.source,
+        "suites": manifest.suites,
+        "available_counts": manifest.counts,
+        "selected_family": family,
+        "selected_suites": suites or [],
+        "selected_strands": strands or [],
+        "selected_case_count": len(selected_cases),
+        "provider": provider_config.__dict__,
         "prompt_limit": prompt_limit,
     }
     artifact_dir = None
     if artifact_root is not None:
         artifact_dir = _write_artifacts(
             artifact_root=artifact_root,
-            mode="memoryarena_proxy",
+            mode="memoryarena_agent",
             summary=summary,
             cases=cases,
             config=config,
@@ -583,14 +1567,20 @@ def _travel_field_values(answer_value: Any) -> list[str]:
     return values
 
 
-def _score_live_case(turn: MemoryArenaTurn, reply_text: str) -> dict[str, Any]:
-    gold_text = turn.gold_answer_text
+def _score_live_case(
+    *,
+    suite: str,
+    gold_answer_text: str,
+    gold_answer_value: Any,
+    reply_text: str,
+) -> dict[str, Any]:
+    gold_text = gold_answer_text
     metrics = {
         "token_f1": token_f1_score(gold_text, reply_text),
         "exact_match": gold_text.strip().lower() == reply_text.strip().lower(),
     }
-    if turn.suite == "group_travel_planner":
-        field_values = _travel_field_values(turn.gold_answer_value)
+    if suite == "group_travel_planner":
+        field_values = _travel_field_values(gold_answer_value)
         hits = sum(1 for value in field_values if value.strip() and value.strip().lower() in reply_text.lower())
         metrics["field_coverage"] = hits / len(field_values) if field_values else None
     return metrics
@@ -1114,7 +2104,16 @@ def run_memoryarena_openclaw(
                     status = "failed"
                     error = exc.stderr.strip() or exc.stdout.strip() or "OpenClaw agent invocation failed"
                 latency_ms = (perf_counter() - started_at) * 1000.0
-                metrics = _score_live_case(turn, reply_text) if status == "ok" else {}
+                metrics = (
+                    _score_live_case(
+                        suite=turn.suite,
+                        gold_answer_text=turn.gold_answer_text,
+                        gold_answer_value=turn.gold_answer_value,
+                        reply_text=reply_text,
+                    )
+                    if status == "ok"
+                    else {}
+                )
                 trace = None
                 trace_steps: list[dict[str, Any]] = []
                 if memory_mode == "prefetch" and status == "ok":

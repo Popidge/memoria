@@ -19,3 +19,4 @@ memoria.db
 raw-stream.jsonl
 raw-openai-completions.jsonl
 integrations/openclaw/node_modules/
+memoryarena/

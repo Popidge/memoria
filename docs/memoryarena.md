@@ -1,9 +1,13 @@
 # MemoryArena
 
-Memoria exposes two benchmark paths for the MemoryArena dataset:
+Memoria exposes three benchmark paths for the MemoryArena dataset:
 
-- `memoryarena_proxy`
+- `memoryarena_offline`
   - fast local regression for tuning the Memoria engine directly
+  - uses derived `snapshot_lookup` and `learn_as_you_act` families
+- `memoryarena_agent`
+  - runs the same derived suite through the local workbench chat loop
+  - supports replay and OpenAI-compatible providers
 - `memoryarena_openclaw`
   - live model-in-the-loop execution through OpenClaw
 
@@ -22,7 +26,27 @@ uv sync --extra benchmark
 
 The default dataset source is `ZexueHe/memoryarena` on Hugging Face. For offline development, benchmark commands also accept `--data-root` pointing at a local fixture tree with `<suite>/data.jsonl`.
 
-## Benchmark Modes
+## Derived Families
+
+`snapshot_lookup`
+- loads the full task corpus before each query
+- tests how well Memoria retrieves facts from pre-existing memory
+
+`learn_as_you_act`
+- reveals state incrementally across the task
+- tests whether Memoria writes the current turn and recalls it on later turns
+
+Cases are also tagged with strands:
+- `incremental_state_tracking`
+- `compatibility_constraints`
+- `entity_accumulation`
+- `composed_fact_lookup`
+- `static_background_recall`
+- `structured_plan_continuity`
+- `paper_context_recall`
+- `reasoning_carryover`
+
+## OpenClaw Modes
 
 `baseline`
 - OpenClaw only, no Memoria memory path
@@ -54,11 +78,30 @@ Cache the dataset and print suite counts:
 uv run memoria memoryarena-sync
 ```
 
-Run the fast local proxy path:
+Build the derived benchmark manifest:
+
+```bash
+uv run memoria memoryarena-build
+```
+
+Run the fast local offline path:
 
 ```bash
 uv run memoria memoryarena-eval --smoke
 uv run memoria memoryarena-eval --suite formal_reasoning_math --full
+uv run memoria memoryarena-eval --family snapshot_lookup --strand paper_context_recall
+uv run memoria memoryarena-eval --jobs auto --trace-mode failures
+```
+
+Run the agent loop path:
+
+```bash
+uv run memoria memoryarena-agent-eval --provider-type replay --smoke
+uv run memoria memoryarena-agent-eval \
+  --provider-type openai-compatible \
+  --model-name openai/gpt-4.1-mini \
+  --api-base-url https://openrouter.ai/api/v1 \
+  --api-key-env OPENROUTER_API_KEY
 ```
 
 Run one live OpenClaw mode:
@@ -101,6 +144,12 @@ Each benchmark mode writes local raw artifacts under:
 - `artifacts/benchmarks/memoryarena/<timestamp>/cases.jsonl`
 - `artifacts/benchmarks/memoryarena/<timestamp>/config.json`
 
+`memoryarena-build` writes derived case files under:
+
+- `artifacts/benchmarks/memoryarena/derived/summary.json`
+- `artifacts/benchmarks/memoryarena/derived/snapshot_lookup.jsonl`
+- `artifacts/benchmarks/memoryarena/derived/learn_as_you_act.jsonl`
+
 The checked-in public summary lives at:
 
 - `docs/benchmarks/memoryarena-latest.json`
@@ -126,22 +175,28 @@ Live comparison summary:
 | Native | 0.1022 | 0.5833 | 13 | 2 | 1 | 0 |
 | Prefetch | 0.2341 | 0.5556 | 13 | 2 | 1 | 0 |
 
-Full proxy regression summary:
+Previous full proxy regression summary:
 - 4,850 turns across all 5 suites
 - support recall@5: `0.5828`
 - support precision@5: `0.3411`
 - prompt support coverage: `0.5877`
 - average prompt size: `107.9` tokens
 
+The current offline suite supersedes `memoryarena_proxy` with `memoryarena_offline`. In addition to support recall/precision and prompt support coverage, it reports:
+- `write_success_rate` for turn-level memory formation
+- `deferred_recall_at_k` for later recall of learned dynamic artifacts
+- `corpus_learned_coverage` for the hybrid snapshot path
+- family, suite, and strand case counts
+
 Methodology note:
 - A timed-out live turn now blocks later turns in the same sampled task instead of repeatedly hammering the same OpenClaw session lock. That keeps the summary honest about one underlying provider/runtime failure rather than inflating it into several synthetic failures.
 
 ## Notes
 
-- `memoryarena_proxy` is for regression and tuning, not leaderboard claims.
+- `memoryarena_offline` and `memoryarena_agent` are for regression and tuning, not leaderboard claims.
 - The live runner currently supports:
   - `group_travel_planner`
   - `formal_reasoning_math`
   - `formal_reasoning_phys`
-- `bundled_shopping` and `progressive_search` remain proxy-only for now.
+- `bundled_shopping` and `progressive_search` are covered by the derived offline/agent suite, but remain outside the live OpenClaw runner for now.
 - Native OpenClaw benchmark runs currently depend on the locally patched OpenClaw install on this machine; document that caveat anywhere results are published.

@@ -177,6 +177,49 @@ class WorkingMemoryItem(Base):
     source_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
 
+class ExperimentRun(Base):
+    __tablename__ = "experiment_runs"
+
+    id: Mapped[str] = mapped_column(String(120), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), default="Untitled run")
+    status: Mapped[str] = mapped_column(String(40), index=True, default="active")
+    provider_type: Mapped[str] = mapped_column(String(60), index=True, default="replay")
+    model_name: Mapped[str] = mapped_column(String(120), default="replay")
+    api_base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    api_key_env: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    namespace_id: Mapped[str] = mapped_column(String(120), index=True)
+    user_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
+    memory_run_id: Mapped[str] = mapped_column(String(120), index=True, unique=True)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    config_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, index=True)
+
+
+class ExperimentTurn(Base):
+    __tablename__ = "experiment_turns"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    experiment_run_id: Mapped[str] = mapped_column(ForeignKey("experiment_runs.id"), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer, index=True)
+    status: Mapped[str] = mapped_column(String(40), index=True, default="ok")
+    user_message: Mapped[str] = mapped_column(Text)
+    assistant_message: Mapped[str] = mapped_column(Text, default="")
+    prompt_addition: Mapped[str] = mapped_column(Text, default="")
+    request_messages_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    provider_payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    usage_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    user_step_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    assistant_step_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now, index=True)
+
+
 Index("ix_entity_namespace_name", Entity.namespace_id, Entity.canonical_name)
 Index("ix_fact_namespace_predicate", Fact.namespace_id, Fact.predicate)
 Index(
@@ -188,3 +231,4 @@ Index(
     GraphEdge.target_node_id,
     unique=True,
 )
+Index("ix_experiment_turn_unique", ExperimentTurn.experiment_run_id, ExperimentTurn.turn_index, unique=True)

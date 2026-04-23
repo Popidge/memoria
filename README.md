@@ -79,9 +79,51 @@ uv run memoria export-graph --namespace-id demo.sports --out sports-graph.json
 uv run memoria evaluate --name all
 ```
 
+## Workbench
+
+Memoria now includes a standalone local workbench for memory-system development.
+It is intentionally independent from OpenClaw and gives you:
+
+- a local web UI for chat, traces, graph snapshots, corpus inspection, and MemoryArena browsing
+- matching CLI commands over the same runtime APIs
+- replay mode for deterministic local testing
+- OpenAI-compatible API support for live LLM-backed runs
+
+Start the local app:
+
+```bash
+uv run memoria workbench-serve
+```
+
+Then open `http://127.0.0.1:8080`.
+
+Useful CLI entrypoints:
+
+```bash
+uv run memoria workbench-runs
+uv run memoria workbench-create-run --provider-type replay --replay-response "Stored."
+uv run memoria workbench-chat --provider-type replay --replay-response "Stored."
+uv run memoria workbench-chat \
+  --provider-type openai-compatible \
+  --model-name openai/gpt-4.1-mini \
+  --api-base-url https://openrouter.ai/api/v1 \
+  --api-key-env OPENROUTER_API_KEY
+uv run memoria workbench-trace <run-id>
+uv run memoria workbench-corpus <run-id>
+uv run memoria workbench-memoryarena
+```
+
+The workbench persists run history in the local SQLite database, alongside the existing memory graph and activation trace tables.
+
 ## MemoryArena
 
-Memoria now has a first-pass [MemoryArena](https://memoryarena.github.io/) integration for multi-session benchmark work.
+Memoria now has a [MemoryArena](https://memoryarena.github.io/) benchmark suite for memory-system development.
+The dataset is transformed into two derived families:
+
+- `snapshot_lookup`: preload the full task corpus, then test retrieval from pre-existing memory
+- `learn_as_you_act`: reveal task state turn by turn, then test whether Memoria writes and later recalls it
+
+Each derived case is tagged with a strand such as `incremental_state_tracking`, `paper_context_recall`, or `structured_plan_continuity`, so runs can target a specific memory behavior.
 
 Install the optional dataset dependency:
 
@@ -89,11 +131,24 @@ Install the optional dataset dependency:
 uv sync --extra benchmark
 ```
 
-Run the fast local regression path:
+Build the derived benchmark files:
+
+```bash
+uv run memoria memoryarena-build
+```
+
+Run the fast local offline regression path:
 
 ```bash
 uv run memoria memoryarena-sync
 uv run memoria memoryarena-eval --smoke
+uv run memoria memoryarena-eval --family learn_as_you_act --strand paper_context_recall
+```
+
+Run the same derived suite through the local workbench agent loop:
+
+```bash
+uv run memoria memoryarena-agent-eval --provider-type replay --smoke
 ```
 
 Run one live OpenClaw mode once your local sidecar and plugin are up:
@@ -161,7 +216,7 @@ Checked-in benchmark summary:
 
 Native improves over baseline on this sampled live run by `+0.061` token F1 and `+0.187` travel field coverage. Prefetch performs best here, but it remains a debug ceiling rather than the target architecture because the goal is first-class memory inside the OpenClaw turn loop, not prompt stuffing from outside the loop.
 
-The full offline `memoryarena_proxy` sweep covers all 5 suites and 4,850 turns. On the `2026-04-09` run it reached `0.583` support recall@5, `0.341` support precision@5, `0.588` prompt support coverage, and an average prompt size of about `108` tokens.
+The previous full offline proxy sweep covered all 5 suites and 4,850 turns. On the `2026-04-09` run it reached `0.583` support recall@5, `0.341` support precision@5, `0.588` prompt support coverage, and an average prompt size of about `108` tokens. The current local offline suite supersedes that path with derived `snapshot_lookup` and `learn_as_you_act` families plus write/deferred-recall metrics.
 
 One formal-reasoning physics turn timed out across all live modes on this model/provider stack. Later turns in that same task are marked `blocked` in the benchmark instead of being counted as extra failures, so the summary reflects the real provider/runtime limitation more honestly.
 

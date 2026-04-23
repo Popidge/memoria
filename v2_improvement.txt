@@ -1,0 +1,33 @@
+This file is a rough set of improvements to memoria to continue the project. Where items are questions, these are areas to experiment with various approaches and see what works best.
+
+1. MemoryArena Benchmarking [completed]
+    We've incorporated the MemoryArena dataset for benchmarking. We should adapt this into our agentic memory benchmarking suite.
+        i. [done] Analyse the data and copy into two datasets; a full pre-existing memory corpus and a "learn as you act" set. The full corpus tests how well an agent with memoria performs at looking up memories, while the "learn as you act" set tests memory making during agentic use.
+        ii. [done] From the benchmarked memories and the tasks in the dataset, produce a suite of tasks for each strand focused on those areas.
+        iii. [done] Create a suitable, configurable test/benchmark suite for these.
+
+2. Knowledge graph improvements
+    Improve the general quality of the knowledge graph index of the agent memory corpus.
+        i. Look into how it indexes and shows relations between individual memory nodes
+        ii. Improve classification of nodes
+        iii. Explore how nodes link to the raw text memories
+        iv. Ensure querying the graph and maintaining the activation field is performant, so that memories surface at the right time between agent turns.
+
+3. Memory corpus formation
+    Make sure the raw text memories that provide the factual foundation of the memories are well-organised and fit for the overall structure
+        i. Do we decide to organise based on the knowledge graph, or organise episodically and allow the graph to be the index?
+        ii. Do we add in specific machine-readable elements to ease search/retrieval
+        iii. How do we chunk memories for linking to the knowledge graph
+
+4. Surfacing and salience
+    The algorithmic special sauce - improving how nodes in the knowledge graph return salience as an agentic turn progresses, and dissipate as they're no longer relevant to the current train of thought
+        i. Activation thresholds for promoting "primary memory matches" to agent context
+        ii. Cascading activation - if a node hits threshold, which nodes connected also should be included?
+        iii. Decay - how much do we decay the salience of nodes as the agent's train of thought moves away from needing previously lit-up memories?
+        iv. Frequency of updating salience over the graph - with every agentic step in turn, or if agent streams responses, update as fresh tokens come in?
+
+5. Harness integration
+    When a memory is surfaced, how do we inject it into context? Given the idea is to give a way for memories to surface and be injected "naturally", meaning less explicit tool calls to "actively" remember, when and how do we put it into the context so it's usable by an agent?
+        i. System prompting - do we explicitly tell the agent to expect memories to surface, as well as giving it tools to query and retrieve them explicitly if it decides to?
+        ii. Amount - tied to graph and corpus granularity - should also be aware to make sure enough context around a specific memory is surfaced?
+        iii. Format - how do we inject into context in a way that makes sure the LLM attends to it in the correct way?

@@ -11,10 +11,15 @@ from memoria.memoryarena import (
     _classify_openclaw_response,
     _parse_json_output,
     _trace_step_type,
-    evaluate_memoryarena_proxy,
+    build_memoryarena_derived_manifest,
+    evaluate_memoryarena_agent,
+    evaluate_memoryarena_offline,
     load_memoryarena_corpus,
+    materialize_memoryarena_derived_manifest,
     write_public_memoryarena_summary,
 )
+from memoria.providers import ProviderConfig
+from memoria.workbench import WorkbenchService
 
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "memoryarena"
@@ -32,35 +37,131 @@ def test_load_memoryarena_corpus_from_fixtures():
     assert math_task.turns[1].background_items == ["Use the prior simplification when answering the follow-up."]
 
 
-def test_proxy_evaluation_writes_artifacts(engine, tmp_path: Path):
-    corpus = load_memoryarena_corpus(
-        data_root=FIXTURE_ROOT,
-        suites=["group_travel_planner", "formal_reasoning_math"],
-    )
+def test_build_memoryarena_manifest_and_materialize(tmp_path: Path):
+    corpus = load_memoryarena_corpus(data_root=FIXTURE_ROOT)
+    manifest = build_memoryarena_derived_manifest(corpus)
 
-    result = evaluate_memoryarena_proxy(
+    assert manifest.manifest_version == "memoryarena-derived-v1"
+    assert len(manifest.cases) == 20
+    assert manifest.cases[0].case_id == "snapshot_lookup:bundled_shopping:0:turn_0"
+    assert {case.strand for case in manifest.cases if case.suite == "bundled_shopping"} == {
+        "incremental_state_tracking",
+        "compatibility_constraints",
+    }
+
+    built = materialize_memoryarena_derived_manifest(corpus, artifact_root=tmp_path / "artifacts")
+
+    assert Path(built["files"]["snapshot_lookup"]).exists()
+    assert Path(built["files"]["learn_as_you_act"]).exists()
+    assert built["summary"]["family_counts"] == {
+        "snapshot_lookup": 10,
+        "learn_as_you_act": 10,
+    }
+
+
+def test_offline_memoryarena_eval_writes_family_metrics(engine, tmp_path: Path):
+    corpus = load_memoryarena_corpus(data_root=FIXTURE_ROOT)
+    manifest = build_memoryarena_derived_manifest(corpus)
+
+    result = evaluate_memoryarena_offline(
         engine,
-        corpus,
+        manifest,
         artifact_root=tmp_path / "artifacts",
     )
 
-    assert result["summary"]["mode"] == "memoryarena_proxy"
-    assert result["summary"]["case_count"] == 4
-    assert result["config"]["available_counts"] == {
-        "group_travel_planner": 1,
-        "formal_reasoning_math": 1,
+    assert result["summary"]["mode"] == "memoryarena_offline"
+    assert result["summary"]["case_count"] == 20
+    assert result["summary"]["family_case_counts"] == {
+        "learn_as_you_act": 10,
+        "snapshot_lookup": 10,
     }
-    assert result["config"]["selected_counts"]["task_count"] == 2
-    assert result["config"]["selected_counts"]["turn_count"] == 4
+    assert result["summary"]["write_success_rate"] is not None
+    assert result["summary"]["deferred_recall_at_k"] is not None
+    assert result["summary"]["corpus_learned_coverage"] is not None
     assert result["artifact_dir"] is not None
     cases_path = Path(result["artifact_dir"]) / "cases.jsonl"
     summary_path = Path(result["artifact_dir"]) / "summary.json"
     assert cases_path.exists()
     assert summary_path.exists()
     second_math_case = next(
-        case for case in result["cases"] if case["suite"] == "formal_reasoning_math" and case["turn_index"] == 1
+        case
+        for case in result["cases"]
+        if case["family"] == "learn_as_you_act"
+        and case["suite"] == "formal_reasoning_math"
+        and case["turn_index"] == 1
     )
     assert second_math_case["support_expected_count"] >= 1
+    assert second_math_case["deferred_recall_at_k"] is not None
+    snapshot_case = next(case for case in result["cases"] if case["family"] == "snapshot_lookup")
+    assert snapshot_case["trace"]["mode"] == "summary"
+    assert snapshot_case["corpus_expected_artifact_count"] >= snapshot_case["corpus_learned_artifact_count"]
+
+
+def test_offline_memoryarena_eval_legacy_full_trace(engine):
+    corpus = load_memoryarena_corpus(data_root=FIXTURE_ROOT, suites=["formal_reasoning_math"])
+    manifest = build_memoryarena_derived_manifest(corpus)
+
+    result = evaluate_memoryarena_offline(
+        engine,
+        manifest,
+        strategy="legacy",
+        trace_mode="full",
+    )
+
+    assert result["config"]["strategy"] == "legacy"
+    assert result["config"]["trace_mode"] == "full"
+    assert result["summary"]["family_case_counts"] == {
+        "learn_as_you_act": 2,
+        "snapshot_lookup": 2,
+    }
+    assert "mode" not in result["cases"][0]["trace"]
+    assert result["cases"][0]["trace"]["steps"]
+
+
+def test_offline_memoryarena_eval_parallel_jobs_match_serial(tmp_path: Path):
+    corpus = load_memoryarena_corpus(data_root=FIXTURE_ROOT)
+    manifest = build_memoryarena_derived_manifest(corpus)
+    from memoria.config import EngineConfig
+    from memoria.engine import MemoryEngine
+
+    serial_engine = MemoryEngine(
+        config=EngineConfig(database_url=f"sqlite:///{tmp_path / 'serial.db'}", use_sentence_transformers=False)
+    )
+    parallel_engine = MemoryEngine(
+        config=EngineConfig(database_url=f"sqlite:///{tmp_path / 'parallel.db'}", use_sentence_transformers=False)
+    )
+
+    serial = evaluate_memoryarena_offline(serial_engine, manifest)
+    parallel = evaluate_memoryarena_offline(parallel_engine, manifest, jobs=2)
+
+    assert parallel["config"]["worker_count"] == 2
+    assert parallel["summary"]["case_count"] == serial["summary"]["case_count"]
+    assert [case["case_id"] for case in parallel["cases"]] == [case["case_id"] for case in serial["cases"]]
+    assert parallel["summary"]["family_case_counts"] == serial["summary"]["family_case_counts"]
+
+
+def test_memoryarena_agent_eval_replay_smoke(engine, tmp_path: Path):
+    corpus = load_memoryarena_corpus(
+        data_root=FIXTURE_ROOT,
+        suites=["group_travel_planner", "formal_reasoning_math", "formal_reasoning_phys"],
+    )
+    manifest = build_memoryarena_derived_manifest(corpus)
+    service = WorkbenchService(engine)
+
+    result = evaluate_memoryarena_agent(
+        service,
+        manifest,
+        provider_config=ProviderConfig(provider_type="replay", model_name="replay"),
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    assert result["summary"]["mode"] == "memoryarena_agent"
+    assert result["summary"]["case_count"] == 12
+    assert result["summary"]["token_f1"] == 1.0
+    assert result["summary"]["exact_match_rate"] == 1.0
+    assert result["artifact_dir"] is not None
+    travel_case = next(case for case in result["cases"] if case["suite"] == "group_travel_planner")
+    assert travel_case["field_coverage"] == 1.0
 
 
 def test_memoryarena_eval_cli_accepts_fixture_root(tmp_path: Path):
@@ -78,13 +179,59 @@ def test_memoryarena_eval_cli_accepts_fixture_root(tmp_path: Path):
             str(FIXTURE_ROOT),
             "--suite",
             "formal_reasoning_phys",
+            "--family",
+            "snapshot_lookup",
+            "--strand",
+            "paper_context_recall",
+            "--artifact-root",
+            str(artifact_root),
+            "--strategy",
+            "legacy",
+            "--trace-mode",
+            "summary",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"mode": "memoryarena_offline"' in result.stdout
+
+
+def test_memoryarena_build_and_agent_eval_cli_accept_fixture_root(tmp_path: Path):
+    runner = CliRunner()
+    db_path = tmp_path / "cli-agent.db"
+    artifact_root = tmp_path / "bench-artifacts"
+
+    build_result = runner.invoke(
+        app,
+        [
+            "memoryarena-build",
+            "--data-root",
+            str(FIXTURE_ROOT),
+            "--artifact-root",
+            str(artifact_root),
+        ],
+    )
+    agent_result = runner.invoke(
+        app,
+        [
+            "memoryarena-agent-eval",
+            "--db",
+            f"sqlite:///{db_path}",
+            "--data-root",
+            str(FIXTURE_ROOT),
+            "--suite",
+            "formal_reasoning_math",
+            "--provider-type",
+            "replay",
             "--artifact-root",
             str(artifact_root),
         ],
     )
 
-    assert result.exit_code == 0
-    assert '"mode": "memoryarena_proxy"' in result.stdout
+    assert build_result.exit_code == 0
+    assert '"snapshot_lookup"' in build_result.stdout
+    assert agent_result.exit_code == 0
+    assert '"mode": "memoryarena_agent"' in agent_result.stdout
 
 
 def test_openclaw_response_classification_and_trace_step_type():
