@@ -93,6 +93,14 @@ uv run memoria memoryarena-eval --family snapshot_lookup --strand paper_context_
 uv run memoria memoryarena-eval --jobs auto --trace-mode failures
 ```
 
+Run the v2 experiment wrapper when comparing architecture changes:
+
+```bash
+uv run memoria memoryarena-experiment --label v2-baseline --family all --jobs auto
+```
+
+This writes the normal offline artifacts plus `scorecard.json`, grouped by family, suite, and strand with recall, write success, deferred recall, prompt size, latency, and failed cases by strand.
+
 Run the agent loop path:
 
 ```bash

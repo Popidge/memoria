@@ -19,6 +19,7 @@ from memoria.memoryarena import (
     build_memoryarena_derived_manifest,
     compare_memoryarena_openclaw,
     evaluate_memoryarena_agent,
+    evaluate_memoryarena_experiment,
     evaluate_memoryarena_offline,
     evaluate_memoryarena_proxy,
     load_memoryarena_corpus,
@@ -216,6 +217,50 @@ def memoryarena_eval_command(
         jobs=jobs,
     )
     typer.echo(json.dumps(result, indent=2))
+
+
+@app.command("memoryarena-experiment")
+def memoryarena_experiment_command(
+    label: str = typer.Option(..., help="Experiment label for the scorecard."),
+    db: str = typer.Option("sqlite:///memoria.db", help="SQLite database URL."),
+    suite: list[str] = typer.Option([], "--suite", help="MemoryArena suite to evaluate. Repeat to select multiple."),
+    family: str = typer.Option("all", help="Benchmark family: snapshot_lookup, learn_as_you_act, or all."),
+    strand: list[str] = typer.Option([], "--strand", help="Optional strand filter. Repeat to select multiple."),
+    revision: str = typer.Option(DEFAULT_REVISION, help="Dataset revision to evaluate."),
+    cache_dir: Path = typer.Option(DEFAULT_CACHE_DIR, help="Dataset cache directory."),
+    data_root: Path | None = typer.Option(None, help="Optional local fixture root for offline development."),
+    smoke: bool = typer.Option(True, "--smoke/--full", help="Run the smoke slice by default."),
+    limit: int | None = typer.Option(None, help="Optional per-suite task limit."),
+    artifact_root: Path = typer.Option(DEFAULT_ARTIFACT_ROOT, help="Artifact directory root."),
+    prompt_limit: int = typer.Option(4, help="Prompt addition working-memory limit."),
+    strategy: str = typer.Option("hybrid", help="Offline strategy: hybrid or legacy."),
+    trace_mode: str = typer.Option("failures", help="Trace capture mode: summary, full, or failures."),
+    jobs: str = typer.Option("auto", help="Offline worker count for task-level parallelism, or auto."),
+) -> None:
+    engine = _engine(db)
+    limit_per_suite = limit if limit is not None else (DEFAULT_SMOKE_LIMIT if smoke else None)
+    corpus = load_memoryarena_corpus(
+        suites=suite or None,
+        revision=revision,
+        cache_dir=cache_dir,
+        data_root=data_root,
+        limit_per_suite=limit_per_suite,
+    )
+    manifest = build_memoryarena_derived_manifest(corpus)
+    result = evaluate_memoryarena_experiment(
+        engine,
+        manifest,
+        label=label,
+        family=family,
+        suites=corpus.suites,
+        strands=strand or None,
+        artifact_root=artifact_root,
+        prompt_limit=prompt_limit,
+        strategy=strategy,
+        trace_mode=trace_mode,
+        jobs=jobs,
+    )
+    typer.echo(json.dumps({"scorecard": result["scorecard"], "artifact_dir": result["artifact_dir"]}, indent=2))
 
 
 @app.command("memoryarena-build")

@@ -11,6 +11,7 @@ import json
 import re
 
 from memoria.engine import MemoryEngine
+from memoria.context import build_memory_context_packet, render_memory_context_packet
 from memoria.models import Episode, SourceType
 
 
@@ -279,17 +280,30 @@ class MemoriaSidecar:
         )
         trace = self.engine.get_debug_trace(session.run_id)
         latest_step = trace["steps"][-1] if trace["steps"] else None
+        packet = build_memory_context_packet(
+            run_id=session.run_id,
+            step_index=latest_step["step_index"] if latest_step is not None else None,
+            query=text,
+            working_memory=prompt_working_memory,
+            evidence_snippets=supporting_snippets,
+            metadata={"session_key": session.session_key, "step_type": step_type},
+            limit=prompt_limit,
+        )
+        prompt_addition = render_memory_context_packet(packet)
+        if not prompt_addition:
+            prompt_addition = _build_prompt_addition_with_support(
+                prompt_working_memory,
+                supporting_snippets,
+                limit=prompt_limit,
+            )
         return {
             "session_key": session.session_key,
             "run_id": session.run_id,
             "trace_id": session.run_id,
             "step_index": latest_step["step_index"] if latest_step is not None else None,
             "working_memory": working_memory,
-            "prompt_addition": _build_prompt_addition_with_support(
-                prompt_working_memory,
-                supporting_snippets,
-                limit=prompt_limit,
-            ),
+            "memory_context_packet": packet,
+            "prompt_addition": prompt_addition,
         }
 
     def after_turn(

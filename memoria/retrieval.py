@@ -7,8 +7,21 @@ from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from memoria.config import EngineConfig
-from memoria.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode
-from memoria.utils import TextEmbedder, build_text_signal, cosine_similarity, extract_keywords, keyword_overlap, recency_decay
+from memoria.models import (
+    ActivationState,
+    ChunkEvidenceLink,
+    Entity,
+    Episode,
+    EpisodeChunk,
+    Fact,
+    GraphEdge,
+    NodeKey,
+    NodeDescriptor,
+    NodeType,
+    ProvenanceLink,
+    SummaryNode,
+)
+from memoria.utils import TextEmbedder, build_text_signal, cosine_similarity, keyword_overlap, recency_decay
 
 
 @dataclass
@@ -47,6 +60,7 @@ class RetrievalService:
             (SummaryNode, NodeType.SUMMARY),
             (Fact, NodeType.FACT),
             (Entity, NodeType.ENTITY),
+            (EpisodeChunk, NodeType.EPISODE_CHUNK),
             (Episode, NodeType.EPISODE),
         ):
             for row in self._query_model(session, model, node_type, namespace_id, signal, filters):
@@ -77,7 +91,13 @@ class RetrievalService:
             .where(ActivationState.run_id == run_id, ActivationState.step_index == previous_step)
             .order_by(desc(ActivationState.activation_value))
         ).all()
-        hot_keys = {(state.node_type, state.node_id) for state in hot_states[: limit or 8]}
+        primary_threshold = self.config.thresholds.summary
+        hot_keys = {
+            (state.node_type, state.node_id)
+            for state in hot_states
+            if state.activation_value >= primary_threshold
+        }
+        hot_keys = set(list(hot_keys)[: limit or 8])
         neighbors: list[NodeKey] = []
         for edge in session.scalars(select(GraphEdge).where(GraphEdge.namespace_id == namespace_id)).all():
             if (edge.source_node_type, edge.source_node_id) in hot_keys:
@@ -97,6 +117,9 @@ class RetrievalService:
         if node_key.node_type == NodeType.SUMMARY:
             summary = session.get(SummaryNode, node_key.node_id)
             return f"{summary.title}. {summary.summary}" if summary else ""
+        if node_key.node_type == NodeType.EPISODE_CHUNK:
+            chunk = session.get(EpisodeChunk, node_key.node_id)
+            return chunk.summary or chunk.text if chunk else ""
         episode = session.get(Episode, node_key.node_id)
         return episode.content_summary or episode.content_raw if episode else ""
 
@@ -107,7 +130,7 @@ class RetrievalService:
             text = self._row_text(row, node_type)
             semantic = cosine_similarity(signal.embedding, getattr(row, "embedding", None))
             keyword = keyword_overlap(signal.text, text)
-            scope_score = self._scope_score(row, node_type, filters)
+            scope_score = self._scope_score(session, row, node_type, filters)
             entity_bonus = self._entity_bonus(signal.linked_entities, text)
             scope_score += entity_bonus
             confidence = getattr(row, "confidence", 1.0)
@@ -134,9 +157,11 @@ class RetrievalService:
             return row.summary
         if node_type == NodeType.SUMMARY:
             return f"{row.title}. {row.summary}"
+        if node_type == NodeType.EPISODE_CHUNK:
+            return row.summary or row.text
         return row.content_summary or row.content_raw
 
-    def _scope_score(self, row, node_type: NodeType, filters: dict[str, Any]) -> float:
+    def _scope_score(self, session: Session, row, node_type: NodeType, filters: dict[str, Any]) -> float:
         if not filters:
             return 0.0
         matches = 0.0
@@ -144,6 +169,15 @@ class RetrievalService:
             for field in ("user_id", "agent_id", "session_id"):
                 if filters.get(field) and getattr(row, field, None) == filters[field]:
                     matches += self.config.scope_match_bonus
+        if node_type == NodeType.EPISODE_CHUNK:
+            # Chunk rows keep source scope on their parent episode; loading it keeps the
+            # scope behavior consistent with episode retrieval without denormalizing ids.
+            parent = session.get(Episode, row.episode_id)
+            if parent is not None:
+                for field in ("user_id", "agent_id", "session_id"):
+                    if filters.get(field) and getattr(parent, field, None) == filters[field]:
+                        matches += self.config.scope_match_bonus
+            matches += min(0.12, getattr(row, "salience_seed", 0.0) * 0.15)
         return matches
 
     def _entity_bonus(self, linked_entities: list[str], text: str) -> float:
@@ -156,3 +190,21 @@ class RetrievalService:
     def provenance_episode_ids(self, session: Session, fact_id: int) -> list[int]:
         links = session.scalars(select(ProvenanceLink).where(ProvenanceLink.fact_id == fact_id)).all()
         return [link.episode_id for link in links]
+
+    def evidence_chunk_ids(self, session: Session, node_type: str, node_id: int) -> list[int]:
+        links = session.scalars(
+            select(ChunkEvidenceLink).where(
+                ChunkEvidenceLink.target_node_type == node_type,
+                ChunkEvidenceLink.target_node_id == node_id,
+            )
+        ).all()
+        return [link.episode_chunk_id for link in links]
+
+    def node_descriptor(self, session: Session, node_type: str, node_id: int, namespace_id: str | None = None) -> NodeDescriptor | None:
+        query = select(NodeDescriptor).where(
+            NodeDescriptor.node_type == node_type,
+            NodeDescriptor.node_id == node_id,
+        )
+        if namespace_id is not None:
+            query = query.where(NodeDescriptor.namespace_id == namespace_id)
+        return session.scalar(query)

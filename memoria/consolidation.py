@@ -3,13 +3,26 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from memoria.config import EngineConfig
 from memoria.entity_resolution import EntityResolver
 from memoria.extraction import build_summary_titles, extract_entities, extract_fact_candidates
-from memoria.models import Entity, Episode, Fact, GraphEdge, NodeType, ProvenanceLink, SummaryNode, SummaryType
+from memoria.models import (
+    ChunkEvidenceLink,
+    EdgeDescriptor,
+    Entity,
+    Episode,
+    EpisodeChunk,
+    Fact,
+    GraphEdge,
+    NodeDescriptor,
+    NodeType,
+    ProvenanceLink,
+    SummaryNode,
+    SummaryType,
+)
 from memoria.utils import TextEmbedder, summarise_text, utc_now
 
 
@@ -42,12 +55,43 @@ class ConsolidationService:
                 known_entity_ids.append(entity.id)
                 if before is None:
                     entities_created += 1
+                self._upsert_node_descriptor(
+                    session,
+                    namespace_id,
+                    NodeType.ENTITY.value,
+                    entity.id,
+                    _node_class_for_entity(entity),
+                    {"entity_type": entity.entity_type, "aliases": entity.aliases_json},
+                    evidence_count=1,
+                    confidence=0.65,
+                )
 
             for fact_candidate in extract_fact_candidates(episode):
                 fact = self._upsert_fact(session, namespace_id, fact_candidate, episode.created_at)
                 if fact.created_at == fact.updated_at:
                     facts_created += 1
                 self._ensure_provenance(session, fact.id, episode.id)
+                evidence_chunks = self._evidence_chunks_for_fact(session, episode, fact.summary)
+                for chunk in evidence_chunks:
+                    self._ensure_chunk_evidence(
+                        session,
+                        namespace_id,
+                        NodeType.FACT.value,
+                        fact.id,
+                        chunk.id,
+                        evidence_role="supports",
+                        confidence=max(0.55, fact.confidence),
+                    )
+                self._upsert_node_descriptor(
+                    session,
+                    namespace_id,
+                    NodeType.FACT.value,
+                    fact.id,
+                    _node_class_for_fact(fact.predicate, fact.summary),
+                    {"predicate": fact.predicate, "valid_to": fact.valid_to.isoformat() if fact.valid_to else None},
+                    evidence_count=max(1, len(evidence_chunks)),
+                    confidence=fact.confidence,
+                )
                 self._ensure_edge(
                     session,
                     namespace_id,
@@ -91,13 +135,36 @@ class ConsolidationService:
                         0.5,
                     )
 
+            for chunk in session.scalars(select(EpisodeChunk).where(EpisodeChunk.episode_id == episode.id)).all():
+                self._upsert_node_descriptor(
+                    session,
+                    namespace_id,
+                    NodeType.EPISODE_CHUNK.value,
+                    chunk.id,
+                    _node_class_for_chunk(chunk.chunk_type),
+                    {"chunk_type": chunk.chunk_type, "episode_id": chunk.episode_id},
+                    evidence_count=1,
+                    confidence=0.6 + min(chunk.salience_seed, 0.3),
+                )
+
             episode.metadata_json = {**episode.metadata_json, "consolidated_at": utc_now().isoformat()}
             session.add(episode)
+            self._upsert_node_descriptor(
+                session,
+                namespace_id,
+                NodeType.EPISODE.value,
+                episode.id,
+                _node_class_for_episode(episode),
+                {"source_type": episode.source_type, "role": episode.role},
+                evidence_count=1,
+                confidence=0.55,
+            )
             processed += 1
 
         summary_counts = self._refresh_summary_nodes(session, namespace_id)
         summaries_updated += summary_counts
         self._link_summary_edges(session, namespace_id)
+        self._refresh_descriptor_evidence_counts(session, namespace_id)
         return {
             "episodes_processed": processed,
             "facts_created_or_updated": facts_created,
@@ -291,6 +358,16 @@ class ConsolidationService:
             node.importance_prior = importance_prior
         session.add(node)
         session.flush()
+        self._upsert_node_descriptor(
+            session,
+            namespace_id,
+            NodeType.SUMMARY.value,
+            node.id,
+            _node_class_for_summary(summary_type),
+            {"summary_type": summary_type, "title": title},
+            evidence_count=0,
+            confidence=0.7,
+        )
         return node
 
     def _link_summary_edges(self, session: Session, namespace_id: str) -> None:
@@ -333,7 +410,7 @@ class ConsolidationService:
         target_id: int,
         edge_type: str,
         weight: float,
-    ) -> None:
+    ) -> GraphEdge:
         edge = session.scalar(
             select(GraphEdge).where(
                 GraphEdge.namespace_id == namespace_id,
@@ -358,6 +435,142 @@ class ConsolidationService:
             edge.weight = weight
         session.add(edge)
         session.flush()
+        self._upsert_edge_descriptor(
+            session,
+            edge,
+            relation_class=_relation_class_for_edge(edge_type),
+            confidence=max(0.35, min(1.0, weight)),
+            evidence_count=1 if edge_type in {"provenance", "mentions", "summarises"} else 0,
+        )
+        return edge
+
+    def _evidence_chunks_for_fact(self, session: Session, episode: Episode, fact_summary: str) -> list[EpisodeChunk]:
+        chunks = session.scalars(
+            select(EpisodeChunk).where(EpisodeChunk.episode_id == episode.id).order_by(EpisodeChunk.chunk_index)
+        ).all()
+        if not chunks:
+            return []
+        fact_tokens = {token.strip(".,!?").lower() for token in fact_summary.split() if len(token) > 3}
+        ranked = []
+        for chunk in chunks:
+            chunk_tokens = {token.strip(".,!?").lower() for token in chunk.text.split() if len(token) > 3}
+            ranked.append((len(fact_tokens & chunk_tokens), chunk))
+        ranked.sort(key=lambda item: (-item[0], item[1].chunk_index))
+        selected = [chunk for overlap, chunk in ranked if overlap > 0][:2]
+        return selected or [chunks[0]]
+
+    def _ensure_chunk_evidence(
+        self,
+        session: Session,
+        namespace_id: str,
+        target_node_type: str,
+        target_node_id: int,
+        episode_chunk_id: int,
+        evidence_role: str,
+        confidence: float,
+    ) -> None:
+        link = session.scalar(
+            select(ChunkEvidenceLink).where(
+                ChunkEvidenceLink.namespace_id == namespace_id,
+                ChunkEvidenceLink.target_node_type == target_node_type,
+                ChunkEvidenceLink.target_node_id == target_node_id,
+                ChunkEvidenceLink.episode_chunk_id == episode_chunk_id,
+            )
+        )
+        if link is None:
+            link = ChunkEvidenceLink(
+                namespace_id=namespace_id,
+                target_node_type=target_node_type,
+                target_node_id=target_node_id,
+                episode_chunk_id=episode_chunk_id,
+                evidence_role=evidence_role,
+                confidence=confidence,
+            )
+        else:
+            link.evidence_role = evidence_role
+            link.confidence = max(link.confidence, confidence)
+        session.add(link)
+        session.flush()
+
+    def _upsert_node_descriptor(
+        self,
+        session: Session,
+        namespace_id: str,
+        node_type: str,
+        node_id: int,
+        node_class: str,
+        facets: dict,
+        evidence_count: int,
+        confidence: float,
+    ) -> NodeDescriptor:
+        descriptor = session.scalar(
+            select(NodeDescriptor).where(
+                NodeDescriptor.namespace_id == namespace_id,
+                NodeDescriptor.node_type == node_type,
+                NodeDescriptor.node_id == node_id,
+            )
+        )
+        if descriptor is None:
+            descriptor = NodeDescriptor(
+                namespace_id=namespace_id,
+                node_type=node_type,
+                node_id=node_id,
+                node_class=node_class,
+                facets_json=facets,
+                evidence_count=evidence_count,
+                confidence=confidence,
+            )
+        else:
+            descriptor.node_class = node_class
+            descriptor.facets_json = {**dict(descriptor.facets_json or {}), **facets}
+            descriptor.evidence_count = max(descriptor.evidence_count, evidence_count)
+            descriptor.confidence = max(descriptor.confidence, confidence)
+            descriptor.updated_at = utc_now()
+        session.add(descriptor)
+        session.flush()
+        return descriptor
+
+    def _upsert_edge_descriptor(
+        self,
+        session: Session,
+        edge: GraphEdge,
+        relation_class: str,
+        confidence: float,
+        evidence_count: int,
+    ) -> EdgeDescriptor:
+        descriptor = session.scalar(select(EdgeDescriptor).where(EdgeDescriptor.edge_id == edge.id))
+        if descriptor is None:
+            descriptor = EdgeDescriptor(
+                edge_id=edge.id,
+                relation_class=relation_class,
+                confidence=confidence,
+                evidence_count=evidence_count,
+                metadata_json={"edge_type": edge.edge_type},
+            )
+        else:
+            descriptor.relation_class = relation_class
+            descriptor.confidence = max(descriptor.confidence, confidence)
+            descriptor.evidence_count = max(descriptor.evidence_count, evidence_count)
+            descriptor.metadata_json = {**dict(descriptor.metadata_json or {}), "edge_type": edge.edge_type}
+            descriptor.updated_at = utc_now()
+        session.add(descriptor)
+        session.flush()
+        return descriptor
+
+    def _refresh_descriptor_evidence_counts(self, session: Session, namespace_id: str) -> None:
+        descriptors = session.scalars(select(NodeDescriptor).where(NodeDescriptor.namespace_id == namespace_id)).all()
+        for descriptor in descriptors:
+            count = session.scalar(
+                select(func.count(ChunkEvidenceLink.id)).where(
+                    ChunkEvidenceLink.namespace_id == namespace_id,
+                    ChunkEvidenceLink.target_node_type == descriptor.node_type,
+                    ChunkEvidenceLink.target_node_id == descriptor.node_id,
+                )
+            )
+            if count:
+                descriptor.evidence_count = max(descriptor.evidence_count, int(count))
+                session.add(descriptor)
+        session.flush()
 
 
 def extract_entities_for_subject(name: str):
@@ -369,3 +582,70 @@ def extract_entities_for_subject(name: str):
     if name.startswith("episode:"):
         entity_type = "episode_anchor"
     return EntityCandidate(name=name, entity_type=entity_type, summary=summarise_text(name))
+
+
+def _node_class_for_entity(entity: Entity) -> str:
+    if entity.entity_type in {"person", "agent", "episode_anchor"}:
+        return "identity"
+    if entity.entity_type in {"resource", "organization"}:
+        return "resource"
+    return "claim"
+
+
+def _node_class_for_fact(predicate: str, summary: str) -> str:
+    lowered = f"{predicate} {summary}".lower()
+    if predicate.startswith("identity"):
+        return "identity"
+    if predicate in {"prefers", "dislikes"}:
+        return "preference"
+    if predicate in {"working_on", "researching"}:
+        return "task_state"
+    if any(token in lowered for token in ("must", "only", "cannot", "constraint")):
+        return "constraint"
+    if predicate == "tool_result":
+        return "event"
+    return "claim"
+
+
+def _node_class_for_episode(episode: Episode) -> str:
+    if episode.source_type == "tool_result":
+        return "event"
+    if episode.source_type == "imported_doc":
+        return "resource"
+    return "claim"
+
+
+def _node_class_for_chunk(chunk_type: str) -> str:
+    mapping = {
+        "preference": "preference",
+        "constraint": "constraint",
+        "decision": "task_state",
+        "task_state": "task_state",
+        "tool_result": "event",
+        "result": "summary",
+        "reasoning_note": "procedure",
+    }
+    return mapping.get(chunk_type, "claim")
+
+
+def _node_class_for_summary(summary_type: str) -> str:
+    if summary_type in {SummaryType.PROCEDURE.value, SummaryType.COMMUNITY.value}:
+        return "procedure"
+    if summary_type in {SummaryType.PROJECT.value, SummaryType.SESSION_ROLLUP.value}:
+        return "task_state"
+    if summary_type == SummaryType.USER_PROFILE.value:
+        return "identity"
+    return "summary"
+
+
+def _relation_class_for_edge(edge_type: str) -> str:
+    mapping = {
+        "provenance": "supports",
+        "subject_of": "mentions",
+        "object_of": "mentions",
+        "mentions": "mentions",
+        "summarises": "summarises",
+        "references": "same_topic",
+        "supersedes": "updates",
+    }
+    return mapping.get(edge_type, "same_topic")

@@ -12,11 +12,25 @@ from sqlalchemy import select
 
 from memoria.activation import ActivationService
 from memoria.config import DEFAULT_CONFIG, EngineConfig
+from memoria.context import build_memory_context_packet, render_memory_context_packet
 from memoria.consolidation import ConsolidationService
 from memoria.db import create_db_engine, init_db, make_session_factory, session_scope
 from memoria.entity_resolution import EntityResolver
 from memoria.ingestion import EpisodeInput, IngestionService
-from memoria.models import ActivationState, Entity, Episode, Fact, GraphEdge, NodeKey, NodeType, ProvenanceLink, SummaryNode, WorkingMemoryItem
+from memoria.models import (
+    ActivationState,
+    EdgeDescriptor,
+    Entity,
+    Episode,
+    EpisodeChunk,
+    Fact,
+    GraphEdge,
+    NodeDescriptor,
+    NodeType,
+    ProvenanceLink,
+    SummaryNode,
+    WorkingMemoryItem,
+)
 from memoria.retrieval import RetrievalService
 from memoria.utils import TextEmbedder
 
@@ -202,10 +216,20 @@ class MemoryEngine:
                     },
                 )
             run.step_index += 1
+            packet = build_memory_context_packet(
+                run_id=result.run_id,
+                step_index=result.step_index,
+                query=text,
+                working_memory=result.working_memory,
+                metadata={"step_type": step_type, "linked_tool_name": linked_tool_name, **dict(metadata or {})},
+                limit=len(result.working_memory),
+            )
             return {
                 "run_id": result.run_id,
                 "step_index": result.step_index,
                 "working_memory": result.working_memory,
+                "memory_context_packet": packet,
+                "prompt_addition": render_memory_context_packet(packet),
                 "debug": result.debug,
             }
 
@@ -227,6 +251,10 @@ class MemoryEngine:
                     "content": item.content,
                     "score": item.score,
                     "source": item.source_json,
+                    "slot": item.source_json.get("slot", "primary"),
+                    "reason": item.source_json.get("reason", ""),
+                    "evidence_ids": item.source_json.get("evidence_ids", []),
+                    "node_class": item.source_json.get("node_class"),
                 }
                 for item in items
             ]
@@ -272,6 +300,10 @@ class MemoryEngine:
                         "content": item.content,
                         "score": item.score,
                         "source": item.source_json,
+                        "slot": item.source_json.get("slot", "primary"),
+                        "reason": item.source_json.get("reason", ""),
+                        "evidence_ids": item.source_json.get("evidence_ids", []),
+                        "node_class": item.source_json.get("node_class"),
                     }
                 )
             steps = sorted(set(grouped_states) | set(grouped_items))
@@ -291,21 +323,43 @@ class MemoryEngine:
         namespace_id = namespace_id or self.config.namespace_defaults.namespace_id
         with session_scope(self.session_factory) as session:
             nodes = []
+            descriptors = {
+                (descriptor.node_type, descriptor.node_id): descriptor
+                for descriptor in session.scalars(select(NodeDescriptor).where(NodeDescriptor.namespace_id == namespace_id)).all()
+            }
             for model, node_type in (
                 (Entity, NodeType.ENTITY.value),
                 (Fact, NodeType.FACT.value),
                 (SummaryNode, NodeType.SUMMARY.value),
+                (EpisodeChunk, NodeType.EPISODE_CHUNK.value),
                 (Episode, NodeType.EPISODE.value),
             ):
                 for row in session.scalars(select(model).where(model.namespace_id == namespace_id)).all():
-                    label = getattr(row, "canonical_name", None) or getattr(row, "title", None) or getattr(row, "summary", None) or getattr(row, "content_summary", None) or str(row.id)
-                    nodes.append({"id": f"{node_type}:{row.id}", "type": node_type, "label": label})
+                    label = getattr(row, "canonical_name", None) or getattr(row, "title", None) or getattr(row, "summary", None) or getattr(row, "content_summary", None) or getattr(row, "text", None) or str(row.id)
+                    descriptor = descriptors.get((node_type, row.id))
+                    nodes.append(
+                        {
+                            "id": f"{node_type}:{row.id}",
+                            "type": node_type,
+                            "label": label,
+                            "node_class": descriptor.node_class if descriptor else None,
+                            "facets": descriptor.facets_json if descriptor else {},
+                            "evidence_count": descriptor.evidence_count if descriptor else 0,
+                        }
+                    )
+            edge_descriptors = {
+                descriptor.edge_id: descriptor
+                for descriptor in session.scalars(select(EdgeDescriptor)).all()
+            }
             edges = [
                 {
                     "source": f"{edge.source_node_type}:{edge.source_node_id}",
                     "target": f"{edge.target_node_type}:{edge.target_node_id}",
                     "edge_type": edge.edge_type,
                     "weight": edge.weight,
+                    "relation_class": edge_descriptors[edge.id].relation_class if edge.id in edge_descriptors else None,
+                    "confidence": edge_descriptors[edge.id].confidence if edge.id in edge_descriptors else None,
+                    "evidence_count": edge_descriptors[edge.id].evidence_count if edge.id in edge_descriptors else 0,
                 }
                 for edge in session.scalars(select(GraphEdge).where(GraphEdge.namespace_id == namespace_id)).all()
             ]

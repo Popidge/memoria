@@ -19,11 +19,16 @@ export type MemoriaRecallResponse = {
   trace_id: string;
   step_index: number | null;
   prompt_addition: string;
+  memory_context_packet?: Record<string, unknown>;
   working_memory: Array<{
     node_key: string;
     content_type: string;
     content: string;
     score: number;
+    slot?: string;
+    reason?: string;
+    evidence_ids?: Array<number | string>;
+    node_class?: string | null;
     source: Record<string, unknown>;
   }>;
 };

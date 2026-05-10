@@ -4,14 +4,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+import json
 
 from sqlalchemy import func, select
 
+from memoria.context import build_memory_context_packet, render_memory_context_packet
 from memoria.db import session_scope
 from memoria.engine import MemoryEngine
-from memoria.memoryarena import load_memoryarena_corpus
+from memoria.memoryarena import DEFAULT_ARTIFACT_ROOT, load_memoryarena_corpus
 from memoria.models import ActivationState, Entity, Episode, ExperimentRun, ExperimentTurn, Fact, GraphEdge, SummaryNode, WorkingMemoryItem
-from memoria.providers import ProviderConfig, ProviderResult, build_provider
+from memoria.providers import ProviderConfig, build_provider
 from memoria.utils import word_count
 
 
@@ -122,7 +124,17 @@ class WorkbenchService:
             text=message,
             metadata={"phase": "chat", "turn_index": turn_index},
         )
-        prompt_addition = _build_prompt_addition(user_step["working_memory"], limit=prompt_limit)
+        memory_context_packet = build_memory_context_packet(
+            run_id=run.memory_run_id,
+            step_index=user_step["step_index"],
+            query=message,
+            working_memory=user_step["working_memory"],
+            metadata={"phase": "chat", "turn_index": turn_index, "experiment_run_id": run_id},
+            limit=prompt_limit,
+        )
+        prompt_addition = render_memory_context_packet(memory_context_packet)
+        if not prompt_addition:
+            prompt_addition = _build_prompt_addition(user_step["working_memory"], limit=prompt_limit)
         request_messages = self._request_messages(run_id, run.system_prompt, prompt_addition, message)
         provider = build_provider(provider_config)
         provider_result = provider.generate(request_messages)
@@ -168,6 +180,7 @@ class WorkbenchService:
                 "prompt_word_count": word_count(prompt_addition),
                 "working_memory_count": len(user_step["working_memory"]),
                 "assistant_working_memory_count": len(assistant_step["working_memory"]),
+                "memory_context_packet": memory_context_packet,
             },
             latency_ms=provider_result.latency_ms,
             user_step_index=user_step["step_index"],
@@ -365,6 +378,47 @@ class WorkbenchService:
             ],
         }
 
+    def memoryarena_experiments(self, limit: int = 10, artifact_root: Path = DEFAULT_ARTIFACT_ROOT) -> dict[str, Any]:
+        if not artifact_root.exists():
+            return {"artifact_root": str(artifact_root), "experiments": []}
+        rows: list[dict[str, Any]] = []
+        for scorecard_path in sorted(artifact_root.glob("*/scorecard.json"), reverse=True):
+            try:
+                scorecard = json.loads(scorecard_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                continue
+            rows.append(
+                {
+                    "artifact_dir": str(scorecard_path.parent),
+                    "label": scorecard.get("label"),
+                    "case_count": scorecard.get("case_count"),
+                    "support_recall_at_k": scorecard.get("support_recall_at_k"),
+                    "write_success_rate": scorecard.get("write_success_rate"),
+                    "deferred_recall_at_k": scorecard.get("deferred_recall_at_k"),
+                    "prompt_token_count": scorecard.get("prompt_token_count"),
+                    "latency_ms": scorecard.get("latency_ms"),
+                    "strand_counts": scorecard.get("strand_counts") or {},
+                }
+            )
+            if len(rows) >= limit:
+                break
+        return {"artifact_root": str(artifact_root), "experiments": rows}
+
+    def memoryarena_failed_cases(self, strand: str | None = None, artifact_root: Path = DEFAULT_ARTIFACT_ROOT) -> dict[str, Any]:
+        scorecards = sorted(artifact_root.glob("*/scorecard.json"), reverse=True)
+        if not scorecards:
+            return {"artifact_root": str(artifact_root), "failed_cases": {}}
+        scorecard = json.loads(scorecards[0].read_text(encoding="utf-8"))
+        failed = dict(scorecard.get("failed_cases_by_strand") or {})
+        if strand:
+            failed = {strand: failed.get(strand, [])}
+        return {
+            "artifact_root": str(artifact_root),
+            "artifact_dir": str(scorecards[0].parent),
+            "label": scorecard.get("label"),
+            "failed_cases": failed,
+        }
+
     def _request_messages(
         self,
         run_id: str,
@@ -448,6 +502,7 @@ class WorkbenchService:
             "prompt_addition": turn.prompt_addition,
             "usage": turn.usage_json,
             "metadata": turn.metadata_json,
+            "memory_context_packet": (turn.metadata_json or {}).get("memory_context_packet"),
             "latency_ms": turn.latency_ms,
             "user_step_index": turn.user_step_index,
             "assistant_step_index": turn.assistant_step_index,

@@ -61,6 +61,14 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/memoryarena/suites":
                 self._write_json(HTTPStatus.OK, self.server.service.memoryarena_suites())
                 return
+            if parsed.path == "/api/memoryarena/experiments":
+                limit = int(self._query(parsed).get("limit", ["10"])[0])
+                self._write_json(HTTPStatus.OK, self.server.service.memoryarena_experiments(limit=limit))
+                return
+            if parsed.path == "/api/memoryarena/failed-cases":
+                strand = self._query(parsed).get("strand", [None])[0]
+                self._write_json(HTTPStatus.OK, self.server.service.memoryarena_failed_cases(strand=strand))
+                return
             if parsed.path == "/api/memoryarena/tasks":
                 query = self._query(parsed)
                 suite = query.get("suite", [""])[0]

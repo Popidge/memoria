@@ -39,6 +39,7 @@ class NodeType(str, Enum):
     FACT = "Fact"
     SUMMARY = "SummaryNode"
     EPISODE = "Episode"
+    EPISODE_CHUNK = "EpisodeChunk"
 
 
 class WorkingMemoryContentType(str, Enum):
@@ -46,6 +47,7 @@ class WorkingMemoryContentType(str, Enum):
     FACT_SUMMARY = "fact_summary"
     SUMMARY_NODE = "summary_node"
     EPISODE_SNIPPET = "episode_snippet"
+    MEMORY_ATOM = "memory_atom"
 
 
 @dataclass(frozen=True)
@@ -72,6 +74,22 @@ class Episode(Base):
     embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class EpisodeChunk(Base):
+    __tablename__ = "episode_chunks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    namespace_id: Mapped[str] = mapped_column(String(120), index=True)
+    episode_id: Mapped[int] = mapped_column(ForeignKey("episodes.id"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, index=True)
+    chunk_type: Mapped[str] = mapped_column(String(60), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    salience_seed: Mapped[float] = mapped_column(Float, default=0.0)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, index=True)
 
 
 class Entity(Base):
@@ -143,6 +161,47 @@ class GraphEdge(Base):
     weight: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class NodeDescriptor(Base):
+    __tablename__ = "node_descriptors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    namespace_id: Mapped[str] = mapped_column(String(120), index=True)
+    node_type: Mapped[str] = mapped_column(String(40), index=True)
+    node_id: Mapped[int] = mapped_column(Integer, index=True)
+    node_class: Mapped[str] = mapped_column(String(60), index=True)
+    facets_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class EdgeDescriptor(Base):
+    __tablename__ = "edge_descriptors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    edge_id: Mapped[int] = mapped_column(ForeignKey("graph_edges.id"), index=True)
+    relation_class: Mapped[str] = mapped_column(String(60), index=True)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.5)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
+class ChunkEvidenceLink(Base):
+    __tablename__ = "chunk_evidence_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    namespace_id: Mapped[str] = mapped_column(String(120), index=True)
+    target_node_type: Mapped[str] = mapped_column(String(40), index=True)
+    target_node_id: Mapped[int] = mapped_column(Integer, index=True)
+    episode_chunk_id: Mapped[int] = mapped_column(ForeignKey("episode_chunks.id"), index=True)
+    evidence_role: Mapped[str] = mapped_column(String(60), default="supports", index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.6)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class ActivationState(Base):
@@ -222,6 +281,17 @@ class ExperimentTurn(Base):
 
 Index("ix_entity_namespace_name", Entity.namespace_id, Entity.canonical_name)
 Index("ix_fact_namespace_predicate", Fact.namespace_id, Fact.predicate)
+Index("ix_episode_chunk_episode_index", EpisodeChunk.episode_id, EpisodeChunk.chunk_index, unique=True)
+Index("ix_node_descriptor_lookup", NodeDescriptor.namespace_id, NodeDescriptor.node_type, NodeDescriptor.node_id, unique=True)
+Index("ix_edge_descriptor_lookup", EdgeDescriptor.edge_id, unique=True)
+Index(
+    "ix_chunk_evidence_lookup",
+    ChunkEvidenceLink.namespace_id,
+    ChunkEvidenceLink.target_node_type,
+    ChunkEvidenceLink.target_node_id,
+    ChunkEvidenceLink.episode_chunk_id,
+    unique=True,
+)
 Index(
     "ix_graph_edges_lookup",
     GraphEdge.namespace_id,

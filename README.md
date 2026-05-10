@@ -145,6 +145,12 @@ uv run memoria memoryarena-eval --smoke
 uv run memoria memoryarena-eval --family learn_as_you_act --strand paper_context_recall
 ```
 
+Run the v2 experiment scorecard wrapper:
+
+```bash
+uv run memoria memoryarena-experiment --label v2-baseline --family all --jobs auto
+```
+
 Run the same derived suite through the local workbench agent loop:
 
 ```bash

@@ -15,6 +15,7 @@ import json
 import os
 import shutil
 
+from memoria.context import build_memory_context_packet, render_memory_context_packet
 from memoria.engine import MemoryEngine
 from memoria.utils import STOPWORDS, tokenize, word_count
 
@@ -625,6 +626,16 @@ def _content_to_text(item: dict[str, Any]) -> str:
 
 
 def _prompt_addition(working_memory: list[dict[str, Any]], limit: int = 4) -> str:
+    packet = build_memory_context_packet(
+        run_id="memoryarena",
+        step_index=None,
+        query="",
+        working_memory=working_memory,
+        limit=limit,
+    )
+    rendered = render_memory_context_packet(packet)
+    if rendered:
+        return rendered
     lines = ["Relevant Memoria recall for this turn:"]
     for item in working_memory[:limit]:
         content_type = str(item.get("content_type") or "memory")
@@ -724,6 +735,103 @@ def _summary_from_cases(mode: str, cases: list[dict[str, Any]]) -> dict[str, Any
             for status in sorted({case.get("status", "ok") for case in cases})
         },
     }
+
+
+def _scorecard_from_cases(label: str, summary: dict[str, Any], cases: list[dict[str, Any]]) -> dict[str, Any]:
+    def group_by(field: str) -> dict[str, Any]:
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for case in cases:
+            key = str(case.get(field) or "unknown")
+            groups.setdefault(key, []).append(case)
+        return {
+            key: {
+                "case_count": len(group_cases),
+                "support_recall_at_k": _safe_mean([case.get("support_recall_at_k") for case in group_cases]),
+                "write_success_rate": _safe_mean([case.get("write_success_rate") for case in group_cases]),
+                "deferred_recall_at_k": _safe_mean([case.get("deferred_recall_at_k") for case in group_cases]),
+                "prompt_token_count": _safe_mean([case.get("prompt_token_count") for case in group_cases]),
+                "latency_ms": _safe_mean([case.get("latency_ms") for case in group_cases]),
+                "failure_count": sum(1 for case in group_cases if case.get("status") not in {None, "ok"}),
+            }
+            for key, group_cases in sorted(groups.items())
+        }
+
+    strand_counts = summary.get("strand_case_counts") or {}
+    return {
+        "label": label,
+        "mode": "memoryarena_experiment",
+        "case_count": summary.get("case_count", len(cases)),
+        "snapshot_lookup": (summary.get("family_case_counts") or {}).get("snapshot_lookup", 0),
+        "learn_as_you_act": (summary.get("family_case_counts") or {}).get("learn_as_you_act", 0),
+        "strand_counts": strand_counts,
+        "support_recall_at_k": summary.get("support_recall_at_k"),
+        "write_success_rate": summary.get("write_success_rate"),
+        "deferred_recall_at_k": summary.get("deferred_recall_at_k"),
+        "prompt_token_count": summary.get("prompt_token_count"),
+        "latency_ms": summary.get("latency_ms"),
+        "by_family": group_by("family"),
+        "by_suite": group_by("suite"),
+        "by_strand": group_by("strand"),
+        "failed_cases_by_strand": _failed_cases_by_strand(cases),
+    }
+
+
+def _failed_cases_by_strand(cases: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    failed: dict[str, list[dict[str, Any]]] = {}
+    for case in cases:
+        status_failed = case.get("status") not in {None, "ok"}
+        recall = case.get("support_recall_at_k")
+        recall_failed = recall is not None and recall < 1.0
+        if not status_failed and not recall_failed:
+            continue
+        strand = str(case.get("strand") or "unknown")
+        failed.setdefault(strand, []).append(
+            {
+                "case_id": case.get("case_id"),
+                "suite": case.get("suite"),
+                "family": case.get("family"),
+                "turn_index": case.get("turn_index"),
+                "status": case.get("status", "ok"),
+                "support_recall_at_k": recall,
+                "prompt_support_coverage": case.get("prompt_support_coverage"),
+            }
+        )
+    return failed
+
+
+def evaluate_memoryarena_experiment(
+    engine: MemoryEngine,
+    manifest: MemoryArenaDerivedManifest,
+    *,
+    label: str,
+    family: str = "all",
+    suites: list[str] | None = None,
+    strands: list[str] | None = None,
+    artifact_root: Path | None = None,
+    prompt_limit: int = 4,
+    strategy: str = "hybrid",
+    trace_mode: str = "failures",
+    jobs: int | str = "auto",
+) -> dict[str, Any]:
+    result = evaluate_memoryarena_offline(
+        engine,
+        manifest,
+        family=family,
+        suites=suites,
+        strands=strands,
+        artifact_root=artifact_root,
+        prompt_limit=prompt_limit,
+        strategy=strategy,
+        trace_mode=trace_mode,
+        jobs=jobs,
+    )
+    scorecard = _scorecard_from_cases(label, result["summary"], result["cases"])
+    result["summary"] = {**result["summary"], "mode": "memoryarena_experiment", "label": label}
+    result["scorecard"] = scorecard
+    if result.get("artifact_dir"):
+        artifact_dir = Path(result["artifact_dir"])
+        (artifact_dir / "scorecard.json").write_text(json.dumps(scorecard, indent=2, sort_keys=True), encoding="utf-8")
+    return result
 
 
 def _selected_counts(corpus: MemoryArenaCorpus) -> dict[str, Any]:
@@ -937,6 +1045,14 @@ def _offline_case_payload(
     write_success_rate: float | None = None,
 ) -> dict[str, Any]:
     metrics = _support_metrics(case, working_memory, prompt_addition)
+    memory_context_packet = build_memory_context_packet(
+        run_id=trace.get("run_id", "memoryarena") if isinstance(trace, dict) else "memoryarena",
+        step_index=None,
+        query=case.question,
+        working_memory=working_memory,
+        limit=len(working_memory),
+        metadata={"case_id": case.case_id, "family": case.family, "suite": case.suite, "strand": case.strand},
+    )
     return {
         "mode": "memoryarena_offline",
         "status": "ok",
@@ -951,6 +1067,7 @@ def _offline_case_payload(
         "expected_support_ids": case.expected_support_ids,
         "expected_support": metrics["expected_support"],
         "working_memory": working_memory,
+        "memory_context_packet": memory_context_packet,
         "prompt_addition": prompt_addition,
         "support_expected_count": metrics["support_expected_count"],
         "support_recall_at_5": metrics["support_recall_at_5"],
